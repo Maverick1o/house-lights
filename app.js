@@ -51,7 +51,6 @@ let token = localStorage.getItem(TOKEN_KEY);
 let demo = false;
 let lights = [];
 let prefs = JSON.parse(localStorage.getItem(PREFS_KEY) || '{}');
-let refreshTimer = null;
 
 const $ = sel => document.querySelector(sel);
 
@@ -84,8 +83,8 @@ async function api(method, path, body) {
   // 207 Multi-Status: report lights that didn't respond.
   const results = data?.results?.flatMap(r => r.results || [r]) || [];
   const failed = results.filter(r => r.status && r.status !== 'ok');
-  if (failed.length) {
-    toast(`${failed.map(f => f.label || 'A light').join(', ')} didn't respond (${failed[0].status.replace('_', ' ')})`, true);
+  for (const f of failed) {
+    activity.failed.add(`${f.label || 'A light'} (${f.status.replace('_', ' ')})`);
   }
   return data;
 }
@@ -93,16 +92,61 @@ async function api(method, path, body) {
 const sel = s => encodeURIComponent(s);
 const setState = (selector, state) => api('PUT', `/lights/${sel(selector)}/state`, { duration: 0.5, ...state });
 
+// ---------- Activity bar ----------
+// A bar at the top that says what the app is doing right now, so a slow
+// response never looks like nothing happened.
+
+const activity = { busy: null, failed: new Set(), hideTimer: null };
+
+function showActivity(text, kind = 'busy') { // kind: busy | ok | err
+  const bar = $('#activity');
+  clearTimeout(activity.hideTimer);
+  bar.className = kind;
+  $('#activity-text').textContent = text;
+  bar.hidden = false;
+  if (kind !== 'busy') {
+    activity.hideTimer = setTimeout(() => (bar.hidden = true), kind === 'err' ? 7000 : 3000);
+  }
+}
+
+// Progress message for the action in progress.
+function step(text) {
+  if (activity.busy) showActivity(`${activity.busy} — ${text}`);
+}
+
+const wait = ms => new Promise(r => setTimeout(r, ms));
+
 // ---------- Commands ----------
 
-async function run(fn, okMsg) {
+// Run one action at a time. While it runs, the bar shows progress and the
+// controls are locked so repeated taps don't queue up duplicate commands.
+async function run(label, fn) {
+  if (activity.busy) {
+    showActivity(`Still working on “${activity.busy}” — one moment…`);
+    return;
+  }
+  activity.busy = label;
+  activity.failed.clear();
+  document.body.classList.add('busy');
+  const t0 = performance.now();
+  step('sending to LIFX…');
   try {
     await fn();
-    if (okMsg) toast(okMsg);
+    step('sent ✓ checking your lights…');
+    await wait(demo ? 300 : 700); // let the fade finish before reading back
+    await loadLights();
+    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    if (activity.failed.size) {
+      showActivity(`${label} — didn’t reach: ${[...activity.failed].join(', ')}`, 'err');
+    } else {
+      showActivity(`✓ ${label} — done (${secs}s)`, 'ok');
+    }
   } catch (e) {
-    handleError(e);
+    handleError(e, label);
+  } finally {
+    activity.busy = null;
+    document.body.classList.remove('busy');
   }
-  scheduleRefresh();
 }
 
 function zoneCount(light) {
@@ -147,19 +191,23 @@ function patternStates(light, pattern) {
   return states;
 }
 
-async function applyPattern(light, pattern) {
+async function applyPattern(light, pattern, prefix = '') {
   if (!isMultizone(light)) {
     return setState(`id:${light.id}`, {
       power: 'on',
       color: pattern.rainbow ? 'hue:0 saturation:1' : pattern.colors[0],
     });
   }
+  step(`${prefix}stopping any animation…`);
   await api('POST', `/lights/${sel(`id:${light.id}`)}/effects/off`, {});
   // The LIFX API accepts at most 50 states per request, so long strips are
   // painted in several batches.
   const states = patternStates(light, pattern);
   const defaults = { power: 'on', duration: 0.5, brightness: Math.max(light.brightness || 0, 0.6) };
+  const parts = Math.ceil(states.length / MAX_STATES);
   for (let i = 0; i < states.length; i += MAX_STATES) {
+    const part = i / MAX_STATES + 1;
+    step(`${prefix}painting ${zoneCount(light)} lights${parts > 1 ? ` (part ${part} of ${parts})` : ''}…`);
     await api('PUT', '/lights/states', { states: states.slice(i, i + MAX_STATES), defaults });
   }
 }
@@ -167,8 +215,11 @@ const MAX_STATES = 50;
 
 async function applyScene(scene) {
   if (scene.state) return setState('all', scene.state);
-  for (const light of lights.filter(l => l.connected)) {
-    await applyPattern(light, scene.pattern);
+  const targets = lights.filter(l => l.connected);
+  for (const [i, light] of targets.entries()) {
+    const prefix = `${light.label} (${i + 1} of ${targets.length}): `;
+    step(`${prefix}starting…`);
+    await applyPattern(light, scene.pattern, prefix);
   }
 }
 
@@ -197,7 +248,7 @@ function el(tag, attrs = {}, ...children) {
 function renderScenes() {
   const box = $('#scenes');
   box.replaceChildren(...SCENES.map(s =>
-    el('button', { onclick: () => run(() => applyScene(s), `${s.name} on`) }, s.name)));
+    el('button', { onclick: () => run(`${s.name} · whole house`, () => applyScene(s)) }, s.name)));
 }
 
 function renderLights() {
@@ -206,7 +257,10 @@ function renderLights() {
   $('#status').textContent = (demo ? 'Demo mode · ' : '') +
     `${lights.length} light${lights.length === 1 ? '' : 's'} · updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#empty').hidden = lights.length > 0;
+  // Keep "Pattern settings" open across refreshes.
+  const open = new Set([...document.querySelectorAll('details[open]')].map(d => d.dataset.id));
   $('#lights').replaceChildren(...lights.map(lightCard));
+  document.querySelectorAll('details').forEach(d => { if (open.has(d.dataset.id)) d.open = true; });
 }
 
 function lightCard(light) {
@@ -215,13 +269,13 @@ function lightCard(light) {
 
   const toggle = el('input', {
     type: 'checkbox', checked: on, disabled: !light.connected,
-    onchange: e => run(() => setState(id, { power: e.target.checked ? 'on' : 'off' })),
+    onchange: e => run(`${light.label} ${e.target.checked ? 'on' : 'off'}`, () => setState(id, { power: e.target.checked ? 'on' : 'off' })),
   });
 
   const brightness = el('input', {
     type: 'range', min: 1, max: 100, value: Math.round((light.brightness || 0) * 100),
     disabled: !light.connected, 'aria-label': 'Brightness',
-    onchange: e => run(() => setState(id, { power: 'on', brightness: e.target.value / 100 })),
+    onchange: e => run(`${light.label} brightness ${e.target.value}%`, () => setState(id, { power: 'on', brightness: e.target.value / 100 })),
   });
 
   const head = el('div', { class: 'light-head' },
@@ -241,24 +295,24 @@ function lightCard(light) {
   card.append(el('h3', {}, 'Colour'), el('div', { class: 'chips' },
     colors.map(c => el('button', {
       class: 'swatch-btn', title: c.name, 'aria-label': c.name, style: `background:${c.css}`,
-      onclick: () => run(() => setState(id, { power: 'on', color: c.api })),
+      onclick: () => run(`${light.label} → ${c.name}`, () => setState(id, { power: 'on', color: c.api })),
     })),
     hasColor(light) && el('input', {
       type: 'color', 'aria-label': 'Custom colour', value: '#ff8800',
-      onchange: e => run(() => setState(id, { power: 'on', color: e.target.value })),
+      onchange: e => run(`${light.label} → custom colour`, () => setState(id, { power: 'on', color: e.target.value })),
     })));
 
   if (isMultizone(light)) {
     card.append(el('h3', {}, 'Patterns'), el('div', { class: 'chips' },
-      PATTERNS.map(p => el('button', { onclick: () => run(() => applyPattern(light, p), `${p.name} on ${light.label}`) }, p.name)),
+      PATTERNS.map(p => el('button', { onclick: () => run(`${p.name} · ${light.label}`, () => applyPattern(light, p)) }, p.name)),
       el('button', {
-        onclick: () => run(() => api('POST', `/lights/${sel(id)}/effects/move`, { direction: 'forward', period: 2, power_on: true }), 'Animating'),
+        onclick: () => run(`Animate · ${light.label}`, () => api('POST', `/lights/${sel(id)}/effects/move`, { direction: 'forward', period: 2, power_on: true })),
       }, '▶︎ Animate'),
       el('button', {
-        onclick: () => run(() => api('POST', `/lights/${sel(id)}/effects/off`, {}), 'Animation stopped'),
+        onclick: () => run(`Stop animation · ${light.label}`, () => api('POST', `/lights/${sel(id)}/effects/off`, {})),
       }, '■ Stop')));
 
-    card.append(el('details', {},
+    card.append(el('details', { 'data-id': light.id },
       el('summary', { class: 'muted small' }, 'Pattern settings'),
       el('div', { class: 'row', style: 'margin-top:8px' },
         !light.zones?.count && numberPref(light, 'zones', 'Zones on strip', zoneCount(light)),
@@ -299,26 +353,36 @@ function show(screen) {
 }
 
 async function loadLights() {
-  clearTimeout(refreshTimer);
   lights = await api('GET', '/lights/all');
   lights.sort((a, b) => (a.label || '').localeCompare(b.label || ''));
   renderLights();
 }
 
-function scheduleRefresh() {
-  clearTimeout(refreshTimer);
-  refreshTimer = setTimeout(() => loadLights().catch(handleError), 1500);
+// Refresh from LIFX, showing it in the activity bar unless an action is running.
+async function refresh(label = 'Refreshing lights') {
+  if (activity.busy) return;
+  activity.busy = label;
+  step('asking LIFX…');
+  try {
+    await loadLights();
+    showActivity(`✓ ${lights.length} light${lights.length === 1 ? '' : 's'} up to date`, 'ok');
+  } catch (e) {
+    handleError(e, label);
+  } finally {
+    activity.busy = null;
+  }
 }
 
-function handleError(e) {
+function handleError(e, label) {
   if (e.unauthorized) {
     localStorage.removeItem(TOKEN_KEY);
     token = null;
+    $('#activity').hidden = true;
     show('setup');
     showSetupError('Your saved token no longer works. Please paste a new one.');
     return;
   }
-  toast(e.message, true);
+  showActivity(`${label ? `${label} — ` : ''}${e.message}`, 'err');
 }
 
 function showSetupError(msg) {
@@ -327,24 +391,10 @@ function showSetupError(msg) {
   p.hidden = !msg;
 }
 
-let toastTimer;
-function toast(msg, isError = false) {
-  const t = $('#toast');
-  t.textContent = msg;
-  t.className = isError ? 'err' : '';
-  t.hidden = false;
-  clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => (t.hidden = true), isError ? 4500 : 2000);
-}
-
 async function start() {
   show('main');
-  $('#status').textContent = 'Loading lights…';
-  try {
-    await loadLights();
-  } catch (e) {
-    handleError(e);
-  }
+  $('#status').textContent = '';
+  await refresh('Loading your lights');
 }
 
 // ---------- Events ----------
@@ -374,7 +424,7 @@ $('#token-form').addEventListener('submit', async e => {
 $('#demo-btn').addEventListener('click', () => { demo = true; start(); });
 
 document.querySelectorAll('[data-all]').forEach(b =>
-  b.addEventListener('click', () => run(() => setState('all', { power: b.dataset.all }), `All lights ${b.dataset.all}`)));
+  b.addEventListener('click', () => run(`All lights ${b.dataset.all}`, () => setState('all', { power: b.dataset.all }))));
 
 $('#settings-btn').addEventListener('click', () => {
   $('#settings-info').textContent = demo
@@ -384,7 +434,7 @@ $('#settings-btn').addEventListener('click', () => {
   $('#settings').showModal();
 });
 $('#close-settings').addEventListener('click', () => $('#settings').close());
-$('#refresh-btn').addEventListener('click', () => { $('#settings').close(); loadLights().catch(handleError); });
+$('#refresh-btn').addEventListener('click', () => { $('#settings').close(); refresh(); });
 $('#logout-btn').addEventListener('click', () => {
   if (!demo && !confirm('Remove your LIFX token from this phone?')) return;
   localStorage.removeItem(TOKEN_KEY);
@@ -396,7 +446,7 @@ $('#logout-btn').addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && (token || demo) && !$('#main').hidden) loadLights().catch(handleError);
+  if (!document.hidden && (token || demo) && !$('#main').hidden) refresh('Checking for changes');
 });
 
 // ---------- Demo mode (fake lights, no network) ----------

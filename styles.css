@@ -89,9 +89,27 @@ dialog {
 dialog::backdrop { background: rgba(0,0,0,.6); }
 dialog button { width: 100%; margin-top: 10px; }
 
-#toast {
-  position: fixed; left: 50%; bottom: calc(env(safe-area-inset-bottom) + 20px);
-  transform: translateX(-50%); background: #2c313c; border: 1px solid var(--line);
-  padding: 10px 16px; border-radius: 999px; font-size: 14px; max-width: 90vw;
+/* Activity bar */
+#activity {
+  position: sticky; top: calc(env(safe-area-inset-top) + 6px); z-index: 20;
+  display: flex; align-items: center; gap: 10px;
+  margin: 0 0 12px; padding: 12px 14px;
+  background: #262b35; border: 1px solid var(--line); border-left: 4px solid var(--accent);
+  border-radius: 12px; font-size: 15px;
+  box-shadow: 0 6px 20px rgba(0,0,0,.45);
 }
-#toast.err { border-color: var(--danger); color: var(--danger); }
+#activity.ok { border-left-color: #3bdc5a; }
+#activity.err { border-left-color: var(--danger); color: #ffb3b3; }
+#activity:not(.busy) .spinner { display: none; }
+.spinner {
+  width: 18px; height: 18px; flex: none; border-radius: 50%;
+  border: 2px solid #4a505c; border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* While a command is running, lock the controls so taps don't stack up. */
+body.busy #main .card button,
+body.busy #main .card input,
+body.busy #main .card select,
+body.busy #main .card .switch { pointer-events: none; opacity: .5; transition: opacity .15s; }

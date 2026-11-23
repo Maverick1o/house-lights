@@ -14,6 +14,12 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
+  <!-- Activity bar: what the app is doing right now -->
+  <div id="activity" role="status" aria-live="polite" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="activity-text"></span>
+  </div>
+
   <!-- Setup screen: shown until a token is saved -->
   <section id="setup" class="screen" hidden>
     <h1>House Lights</h1>
@@ -65,7 +71,6 @@
     <button id="close-settings" class="primary">Done</button>
   </dialog>
 
-  <div id="toast" role="status" hidden></div>
 
   <script src="app.js"></script>
 </body>
