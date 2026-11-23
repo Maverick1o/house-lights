@@ -109,7 +109,9 @@ function zoneCount(light) {
   return light.zones?.count || prefs[light.id]?.zones || 32;
 }
 function segmentSize(light) {
-  return prefs[light.id]?.segment || 3;
+  // On LIFX Permanent Outdoor one zone is one light, so default to
+  // alternating light-by-light.
+  return prefs[light.id]?.segment || 1;
 }
 // 'none' | 'off' | 'dim' — what goes between coloured segments.
 function gapMode(light) {
