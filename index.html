@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>House Lights</title>
+  <meta name="theme-color" content="#111318">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="House Lights">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- Setup screen: shown until a token is saved -->
+  <section id="setup" class="screen" hidden>
+    <h1>House Lights</h1>
+    <p class="muted">Control the LIFX lights on <strong>your</strong> house. Your access token stays on this phone only.</p>
+    <ol class="steps">
+      <li>On this phone, open <a href="https://cloud.lifx.com/settings" target="_blank" rel="noopener">cloud.lifx.com/settings</a> and sign in with your LIFX account.</li>
+      <li>Tap <em>Generate New Token</em>, name it “House Lights”, and copy it.</li>
+      <li>Paste it below.</li>
+    </ol>
+    <form id="token-form">
+      <input id="token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your LIFX token" required>
+      <button type="submit" class="primary">Connect</button>
+    </form>
+    <p id="setup-error" class="error" hidden></p>
+    <button id="demo-btn" class="link">Try demo mode (no lights needed)</button>
+  </section>
+
+  <!-- Main screen -->
+  <section id="main" class="screen" hidden>
+    <header class="topbar">
+      <div>
+        <h1 id="house-name">My House</h1>
+        <p id="status" class="muted small"></p>
+      </div>
+      <button id="settings-btn" class="icon" aria-label="Settings">⚙︎</button>
+    </header>
+
+    <div class="card">
+      <h2>Whole house</h2>
+      <div class="row">
+        <button class="primary" data-all="on">All on</button>
+        <button data-all="off">All off</button>
+      </div>
+      <h3>Scenes</h3>
+      <div id="scenes" class="chips"></div>
+    </div>
+
+    <div id="lights"></div>
+    <p id="empty" class="muted" hidden>No lights found on this account.</p>
+  </section>
+
+  <!-- Settings sheet -->
+  <dialog id="settings">
+    <h2>Settings</h2>
+    <p class="muted small" id="settings-info"></p>
+    <button id="refresh-btn">Refresh lights</button>
+    <button id="logout-btn" class="danger">Remove token from this phone</button>
+    <p class="muted small">To fully revoke access, delete the token at cloud.lifx.com/settings.</p>
+    <button id="close-settings" class="primary">Done</button>
+  </dialog>
+
+  <div id="toast" role="status" hidden></div>
+
+  <script src="app.js"></script>
+</body>
+</html>
