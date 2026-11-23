@@ -28,6 +28,7 @@ const C = Object.fromEntries(COLORS.map(c => [c.name, c.api]));
 // Patterns repeat their colours along a multizone strip.
 // Lights without zones just get the first colour.
 const PATTERNS = [
+  { name: '✨ Warm bulbs',  colors: [C.Warm] },
   { name: '🎄 Christmas',   colors: [C.Red, C.Green] },
   { name: '🎃 Halloween',   colors: [C.Orange, C.Purple] },
   { name: '🇺🇸 July 4th',   colors: [C.Red, C.White, C.Blue] },
@@ -110,20 +111,36 @@ function zoneCount(light) {
 function segmentSize(light) {
   return prefs[light.id]?.segment || 3;
 }
+// 'none' | 'off' | 'dim' — what goes between coloured segments.
+function gapMode(light) {
+  return prefs[light.id]?.gaps || 'none';
+}
+const GAP_BRIGHTNESS = { off: 0, dim: 0.02 };
 
 // Build zone-range states that paint a pattern along a strip.
+// With gaps on, every other segment is turned off or barely lit,
+// e.g. red, off, green, off, …
 function patternStates(light, pattern) {
   const n = zoneCount(light);
   const seg = segmentSize(light);
+  const gaps = gapMode(light);
   const chunks = Math.ceil(n / seg);
+  const colorChunks = gaps === 'none' ? chunks : Math.ceil(chunks / 2);
   const states = [];
+  let color;
   for (let i = 0; i < chunks; i++) {
     const from = i * seg;
-    const to = Math.min(n - 1, from + seg - 1);
-    const color = pattern.rainbow
-      ? `hue:${Math.round((360 * i) / chunks)} saturation:1`
-      : pattern.colors[i % pattern.colors.length];
-    states.push({ selector: `id:${light.id}|${from}-${to}`, color });
+    const selector = `id:${light.id}|${from}-${Math.min(n - 1, from + seg - 1)}`;
+    if (gaps !== 'none' && i % 2 === 1) {
+      // Keep the neighbour's colour so a dim gap glows the same hue.
+      states.push({ selector, color, brightness: GAP_BRIGHTNESS[gaps] });
+      continue;
+    }
+    const k = gaps === 'none' ? i : i / 2;
+    color = pattern.rainbow
+      ? `hue:${Math.round((360 * k) / colorChunks)} saturation:1`
+      : pattern.colors[k % pattern.colors.length];
+    states.push({ selector, color });
   }
   return states;
 }
@@ -243,9 +260,23 @@ function lightCard(light) {
       el('summary', { class: 'muted small' }, 'Pattern settings'),
       el('div', { class: 'row', style: 'margin-top:8px' },
         !light.zones?.count && numberPref(light, 'zones', 'Zones on strip', zoneCount(light)),
-        numberPref(light, 'segment', 'Zones per colour', segmentSize(light)))));
+        numberPref(light, 'segment', 'Zones per colour', segmentSize(light)),
+        selectPref(light, 'gaps', 'Gaps between colours', gapMode(light), [
+          ['none', 'None'], ['off', 'Off'], ['dim', 'Barely lit'],
+        ]))));
   }
   return card;
+}
+
+function savePref(light, key, value) {
+  prefs[light.id] = { ...prefs[light.id], [key]: value };
+  localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+}
+
+function selectPref(light, key, label, value, options) {
+  return el('label', { class: 'inline' }, label,
+    el('select', { onchange: e => savePref(light, key, e.target.value) },
+      options.map(([v, text]) => el('option', { value: v, selected: v === value }, text))));
 }
 
 function numberPref(light, key, label, value) {
@@ -253,9 +284,7 @@ function numberPref(light, key, label, value) {
     el('input', {
       type: 'number', min: 1, max: 500, value, inputmode: 'numeric',
       onchange: e => {
-        const v = Math.max(1, parseInt(e.target.value, 10) || 1);
-        prefs[light.id] = { ...prefs[light.id], [key]: v };
-        localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
+        savePref(light, key, Math.max(1, parseInt(e.target.value, 10) || 1));
       },
     }));
 }
