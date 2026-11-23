@@ -114,8 +114,7 @@ function segmentSize(light) {
 // Build zone-range states that paint a pattern along a strip.
 function patternStates(light, pattern) {
   const n = zoneCount(light);
-  // The LIFX API accepts up to 50 states per request.
-  const seg = Math.max(segmentSize(light), Math.ceil(n / 50));
+  const seg = segmentSize(light);
   const chunks = Math.ceil(n / seg);
   const states = [];
   for (let i = 0; i < chunks; i++) {
@@ -137,11 +136,15 @@ async function applyPattern(light, pattern) {
     });
   }
   await api('POST', `/lights/${sel(`id:${light.id}`)}/effects/off`, {});
-  return api('PUT', '/lights/states', {
-    states: patternStates(light, pattern),
-    defaults: { power: 'on', duration: 0.5, brightness: Math.max(light.brightness || 0, 0.6) },
-  });
+  // The LIFX API accepts at most 50 states per request, so long strips are
+  // painted in several batches.
+  const states = patternStates(light, pattern);
+  const defaults = { power: 'on', duration: 0.5, brightness: Math.max(light.brightness || 0, 0.6) };
+  for (let i = 0; i < states.length; i += MAX_STATES) {
+    await api('PUT', '/lights/states', { states: states.slice(i, i + MAX_STATES), defaults });
+  }
 }
+const MAX_STATES = 50;
 
 async function applyScene(scene) {
   if (scene.state) return setState('all', scene.state);
