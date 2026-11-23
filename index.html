@@ -47,18 +47,75 @@
       <button id="settings-btn" class="icon" aria-label="Settings">⚙︎</button>
     </header>
 
-    <div class="card">
-      <h2>Whole house</h2>
-      <div class="row">
-        <button class="primary" data-all="on">All on</button>
-        <button data-all="off">All off</button>
+    <div id="groups"></div>
+    <p id="empty" class="muted" hidden>No lights found on this account.</p>
+
+    <div class="row everything">
+      <button data-all="on">Everything on</button>
+      <button data-all="off">Everything off</button>
+    </div>
+  </section>
+
+  <!-- Pattern maker -->
+  <section id="maker" class="screen" hidden>
+    <header class="topbar">
+      <button id="maker-back" class="link">‹ Back</button>
+      <div class="grow center">
+        <h1 class="h-small">Pattern maker</h1>
+        <p id="maker-title" class="muted small"></p>
       </div>
-      <h3>Scenes</h3>
-      <div id="scenes" class="chips"></div>
+      <span style="width:60px"></span>
+    </header>
+
+    <div class="card">
+      <input id="maker-name" type="text" maxlength="40" placeholder="Pattern name (e.g. Candy Cane)">
+      <select id="maker-start" style="margin-top:10px; width:100%"></select>
+      <div class="row" style="margin-top:10px">
+        <button id="maker-share" class="small" hidden>📤 Share with family</button>
+        <button id="maker-delete" class="small danger" hidden>Delete</button>
+      </div>
     </div>
 
-    <div id="lights"></div>
-    <p id="empty" class="muted" hidden>No lights found on this account.</p>
+    <div class="card">
+      <h3 style="margin-top:0">Brush</h3>
+      <div class="brush-row">
+        <div id="brush-preview" class="cell big" aria-hidden="true"></div>
+        <div id="brush-colors" class="chips"></div>
+      </div>
+      <div class="inline" style="margin-top:10px">Brightness <div id="brush-levels" class="chips"></div></div>
+    </div>
+
+    <div class="card">
+      <div class="loop-head">
+        <h3 style="margin:0">Loop</h3>
+        <div class="stepper">
+          <button id="loop-minus" class="small" aria-label="Shorter loop">−</button>
+          <span><span id="loop-len">2</span> lights</span>
+          <button id="loop-plus" class="small" aria-label="Longer loop">+</button>
+        </div>
+      </div>
+      <p class="muted small">Tap or drag to paint. Build the first few lights, then repeat them across the whole string.</p>
+      <div id="loop-grid" class="grid loop" data-kind="loop"></div>
+      <button id="repeat-btn" class="primary wide"></button>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Whole string</h3>
+      <p class="muted small">Every light, in order around the house. Tap any light to change just that one.</p>
+      <div id="full-grid"></div>
+      <label class="inline" style="margin-top:12px">Effect
+        <select id="maker-effect">
+          <option value="none">None (steady)</option>
+          <option value="chase">Chase forward</option>
+          <option value="chase-back">Chase backward</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="maker-actions">
+      <button id="maker-preview" class="primary">💡 Preview on house</button>
+      <button id="maker-save">💾 Save</button>
+    </div>
   </section>
 
   <!-- Settings sheet -->
