@@ -64,7 +64,7 @@
         <h1 class="h-small">Pattern maker</h1>
         <p id="maker-title" class="muted small"></p>
       </div>
-      <span style="width:60px"></span>
+      <button id="maker-save" class="small">💾 Save</button>
     </header>
 
     <div class="card">
@@ -77,15 +77,6 @@
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0">Brush</h3>
-      <div class="brush-row">
-        <div id="brush-preview" class="cell big" aria-hidden="true"></div>
-        <div id="brush-colors" class="chips"></div>
-      </div>
-      <div class="inline" style="margin-top:10px">Brightness <div id="brush-levels" class="chips"></div></div>
-    </div>
-
-    <div class="card">
       <div class="loop-head">
         <h3 style="margin:0">Loop</h3>
         <div class="stepper">
@@ -94,7 +85,7 @@
           <button id="loop-plus" class="small" aria-label="Longer loop">+</button>
         </div>
       </div>
-      <p class="muted small">Tap or drag to paint. Build the first few lights, then repeat them across the whole string.</p>
+      <p class="muted small">Pick a colour and brightness in the bar at the bottom, then tap or drag across lights to paint them. Build the first few lights, then repeat them across the whole string.</p>
       <div id="loop-grid" class="grid loop" data-kind="loop"></div>
       <button id="repeat-btn" class="primary wide"></button>
     </div>
@@ -112,9 +103,13 @@
       </label>
     </div>
 
-    <div class="maker-actions">
-      <button id="maker-preview" class="primary">💡 Preview on house</button>
-      <button id="maker-save">💾 Save</button>
+    <!-- Paint dock: always visible while painting -->
+    <div class="maker-dock">
+      <div id="brush-colors" class="dock-swatches"></div>
+      <div class="dock-row">
+        <div id="brush-levels" class="levels"></div>
+        <button id="maker-preview" class="primary">💡 Preview</button>
+      </div>
     </div>
   </section>
 

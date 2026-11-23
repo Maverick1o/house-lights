@@ -612,11 +612,15 @@ function renderMaker() {
   // Brush colours
   $('#brush-colors').replaceChildren(
     ...COLORS.map(c => sw(c.css, c.name, () => setBrush(c.api), { class: 'swatch-btn' + (m.brush.c === c.api && m.brush.b > 0 ? ' active' : '') })),
-    el('input', { type: 'color', 'aria-label': 'Custom brush colour', value: '#ff8800', onchange: e => setBrush(e.target.value) }),
-    el('button', { class: 'swatch-btn off-swatch' + (m.brush.b === 0 ? ' active' : ''), title: 'Off', 'aria-label': 'Off', onclick: () => { m.brush = { ...m.brush, b: 0 }; renderMaker(); } }));
+    el('input', {
+      type: 'color', class: 'custom-swatch' + (m.brush.c.startsWith('#') && m.brush.b > 0 ? ' active' : ''),
+      title: 'Any colour', 'aria-label': 'Pick any colour',
+      value: m.brush.c.startsWith('#') ? m.brush.c : '#ff8800', onchange: e => setBrush(e.target.value),
+    }),
+    el('button', { class: 'swatch-btn off-swatch' + (m.brush.b === 0 ? ' active' : ''), title: 'Off', 'aria-label': 'Off', onclick: () => { m.brush = { ...m.brush, b: 0 }; renderMaker(); } }, 'Off'));
   $('#brush-levels').replaceChildren(...BRIGHTNESS.map(([v, t]) =>
     el('button', { class: 'small' + (m.brush.b === v ? ' active' : ''), onclick: () => { m.brush = { ...m.brush, b: v }; renderMaker(); } }, t)));
-  paintCellEl($('#brush-preview'), m.brush);
+
 
   // Loop
   $('#loop-len').textContent = m.loop.length;
