@@ -8,41 +8,22 @@
  *
  * Lights are shown by LIFX group. A group of strips behaves like one
  * continuous string: patterns flow from the first strip into the next.
+ *
+ * Where colours live:
+ *   - The pattern maker is the one place patterns are made and edited.
+ *   - The home screen plays them now ("play now"), and shows what's showing.
+ *   - A schedule only picks which pattern fades on in the evening; it points at
+ *     the pattern, so editing it in the maker changes tonight's lights too.
  */
-'use strict';
+import {
+  COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
+  normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
+} from './shared/patterns.js?v=2026.11.24-7';
+import * as P from './shared/patterns.js?v=2026.11.24-7';
+import * as core from './shared/schedule-core.js?v=2026.11.24-7';
 
-const APP_VERSION = '2026.11.24-6';
+const APP_VERSION = '2026.11.24-7';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
-
-// ---------- Colours ----------
-
-const COLORS = [
-  { name: 'Warm',   api: 'kelvin:2700 saturation:0', css: '#ffd7a0' },
-  { name: 'White',  api: 'kelvin:4000 saturation:0', css: '#f4f6ff' },
-  { name: 'Red',    api: 'hue:0 saturation:1',       css: '#ff3b3b' },
-  { name: 'Orange', api: 'hue:28 saturation:1',      css: '#ff8a1f' },
-  { name: 'Yellow', api: 'hue:52 saturation:1',      css: '#ffe03b' },
-  { name: 'Green',  api: 'hue:120 saturation:1',     css: '#3bdc5a' },
-  { name: 'Blue',   api: 'hue:225 saturation:1',     css: '#3b6bff' },
-  { name: 'Purple', api: 'hue:275 saturation:1',     css: '#a64bff' },
-  { name: 'Pink',   api: 'hue:320 saturation:0.7',   css: '#ff6bcf' },
-];
-const C = Object.fromEntries(COLORS.map(c => [c.name, c.api]));
-
-// A cell is one light's setting: colour + brightness (0 = off).
-const cell = (c, b = 1) => ({ c, b });
-const OFF = cell(C.Warm, 0);
-
-const BUILTIN = [
-  { id: 'b-warm',  name: '✨ Warm bulbs', loop: [cell(C.Warm)] },
-  { id: 'b-xmas',  name: '🎄 Christmas',  loop: [cell(C.Red), cell(C.Green)] },
-  { id: 'b-hallo', name: '🎃 Halloween',  loop: [cell(C.Orange), cell(C.Purple)] },
-  { id: 'b-july',  name: '🇺🇸 July 4th',  loop: [cell(C.Red), cell(C.White), cell(C.Blue)] },
-  { id: 'b-winter', name: '❄️ Winter',    loop: [cell(C.White), cell('hue:200 saturation:0.6')] },
-  { id: 'b-valen', name: '💖 Valentine',  loop: [cell(C.Red), cell(C.Pink)] },
-  { id: 'b-patty', name: '☘️ St Patrick', loop: [cell(C.Green), cell('hue:100 saturation:0.5')] },
-  { id: 'b-rainbow', name: '🌈 Rainbow',  rainbow: true },
-];
 
 // Colours used by "Identify strips": strip 1 red, 2 green, 3 blue …
 const IDENT = [
@@ -65,7 +46,6 @@ let lights = [];
 let groupPrefs = {};      // per-group settings for the current house (synced)
 let saved = [];           // this person's saved patterns (synced)
 let identifySnapshot = null; // { gid, lights: [...] } to restore after Identify
-let core = null;          // shared schedule maths (loaded on demand)
 let schedules = {};       // groupId -> schedule, for the current house
 let timerInfo = null;     // { configured, lastTick }
 
@@ -280,20 +260,10 @@ async function run(label, fn) {
 
 // ---------- Groups and the continuous string ----------
 
-const isMultizone = l => !!l.product?.capabilities?.has_multizone;
 const hasColor = l => l.product?.capabilities?.has_color !== false;
-const stripLength = l => (isMultizone(l) ? l.zones?.count || 32 : 1);
 
-function gp(gid) {
-  groupPrefs[gid] ??= {};
-  const p = groupPrefs[gid];
-  p.order ??= [];
-  p.reversed ??= {};
-  p.width ??= 1;
-  p.gaps ??= 'none';
-  p.level ??= 1;
-  return p;
-}
+// A group's settings (strip order, pattern options, brightness, what was last played).
+const gp = gid => (groupPrefs[gid] = withDefaults(groupPrefs[gid]));
 
 // Groups with their lights in the saved order (new lights go at the end).
 function getGroups() {
@@ -303,84 +273,16 @@ function getGroups() {
     if (!byId.has(id)) byId.set(id, { id, name: l.group?.name || 'Lights', lights: [] });
     byId.get(id).lights.push(l);
   }
-  for (const g of byId.values()) {
-    const order = gp(g.id).order;
-    const rank = l => { const i = order.indexOf(l.id); return i === -1 ? 1e6 : i; };
-    g.lights.sort((a, b) => rank(a) - rank(b) || (a.label || '').localeCompare(b.label || ''));
-  }
+  for (const g of byId.values()) g.lights = orderLights(g.lights, gp(g.id));
   return [...byId.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
 
 const groupById = gid => getGroups().find(g => g.id === gid);
 
-// Every light position along the string, in order: [{ light, zone }].
-function positions(stripLights, gid) {
-  const rev = gp(gid).reversed;
-  const out = [];
-  for (const l of stripLights) {
-    if (!isMultizone(l)) { out.push({ light: l, zone: null }); continue; }
-    const n = stripLength(l);
-    for (let i = 0; i < n; i++) out.push({ light: l, zone: rev[l.id] ? n - 1 - i : i });
-  }
-  return out;
-}
-
-const tile = (loop, n) => Array.from({ length: n }, (_, i) => ({ ...loop[i % loop.length] }));
-
-// Built-in patterns honour the group's "lights per colour" and "gaps" options.
-function builtinCells(pattern, gid, n) {
-  const { width, gaps } = gp(gid);
-  const gapB = gaps === 'dim' ? 0.02 : 0;
-  const perBlock = gaps === 'none' ? 1 : 2;
-  const colourBlocks = Math.ceil(n / width / perBlock);
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const block = Math.floor(i / width);
-    const isGap = gaps !== 'none' && block % 2 === 1;
-    const k = Math.floor(block / perBlock);
-    const c = pattern.rainbow
-      ? `hue:${Math.round((360 * k) / colourBlocks)} saturation:1`
-      : pattern.loop[k % pattern.loop.length].c;
-    out.push(cell(c, isGap ? gapB : 1));
-  }
-  return out;
-}
-
-function patternCells(pattern, gid, n) {
-  if (pattern.rainbow || pattern.id?.startsWith('b-')) return builtinCells(pattern, gid, n);
-  if (pattern.cells?.length === n) return pattern.cells.map(x => ({ ...x }));
-  return tile(pattern.loop, n);
-}
-
-const cellKey = (x, level) => `${x.c}|${scaled(x.b, level)}`;
-const scaled = (b, level) => (b > 0 ? Math.max(0.01, Math.round(b * level * 1000) / 1000) : 0);
-
-// Turn per-light cells into the fewest LIFX states (runs of equal zones merge).
-function cellsToStates(pos, cells, level = 1) {
-  const perLight = new Map();
-  pos.forEach((p, i) => {
-    if (!perLight.has(p.light.id)) perLight.set(p.light.id, { light: p.light, zones: [] });
-    const entry = perLight.get(p.light.id);
-    if (p.zone == null) entry.single = cells[i];
-    else entry.zones[p.zone] = cells[i];
-  });
-  const states = [];
-  for (const { light, zones, single } of perLight.values()) {
-    if (single) {
-      states.push({ selector: `id:${light.id}`, color: single.c, brightness: scaled(single.b, level) });
-      continue;
-    }
-    let start = 0;
-    for (let z = 1; z <= zones.length; z++) {
-      if (z === zones.length || cellKey(zones[z], level) !== cellKey(zones[start], level)) {
-        const x = zones[start];
-        states.push({ selector: `id:${light.id}|${start}-${z - 1}`, color: x.c, brightness: scaled(x.b, level) });
-        start = z;
-      }
-    }
-  }
-  return states;
-}
+// Light positions along the string, and the cells a pattern paints on them,
+// using this group's strip order and pattern options (see shared/patterns.js).
+const positions = (stripLights, gid) => P.positions(stripLights, gp(gid));
+const patternCells = (pattern, gid, n) => P.patternCells(pattern, gp(gid), n);
 
 async function sendStates(states, what) {
   const parts = Math.ceil(states.length / MAX_STATES);
@@ -394,47 +296,12 @@ async function sendStates(states, what) {
   }
 }
 
-// Paint cells along a set of strips, then optionally start an effect.
-// Motion: what the lights do after a pattern is painted.
-//   { type: 'none' | 'chase' | 'breathe' | 'pulse', dir, speed, to }
-// Older patterns stored just a string ('chase', 'chase-back', …); both work.
-// Speed is a slider from 0 (slowest) to 1 (fastest). It maps to the LIFX
-// "period" (seconds per cycle) on a curve, so every step of the slider feels
-// like a similar change in speed.
-const PERIODS = {
-  chase: { slow: 8, fast: 0.3 },     // seconds per step along the strip
-  breathe: { slow: 10, fast: 1 },    // seconds per fade in and out
-  pulse: { slow: 3, fast: 0.25 },    // seconds per blink
-};
-const OLD_SPEEDS = { slow: 0.2, medium: 0.5, fast: 0.8 }; // patterns saved before the slider
-const periodFor = (type, speed) => {
-  const p = PERIODS[type];
-  return p && Math.round(p.slow * (p.fast / p.slow) ** speed * 100) / 100;
-};
-const DEFAULT_TO = 'brightness:0.05';
-function normalizeMotion(effect, motion = {}) {
-  if (effect && typeof effect === 'object') return normalizeMotion(effect.type, effect);
-  const type = effect === 'chase' || effect === 'chase-back' ? 'chase' : effect === 'breathe' || effect === 'pulse' ? effect : 'none';
-  return {
-    type,
-    dir: effect === 'chase-back' || motion.dir === 'backward' ? 'backward' : 'forward',
-    speed: typeof motion.speed === 'number' && motion.speed >= 0 && motion.speed <= 1 ? motion.speed
-      : OLD_SPEEDS[motion.speed] ?? 0.5,
-    to: typeof motion.to === 'string' && motion.to.length < 60 ? motion.to : DEFAULT_TO,
-  };
-}
-const legacyEffect = mo => (mo.type === 'chase' ? (mo.dir === 'backward' ? 'chase-back' : 'chase') : mo.type);
-
 function startMotion(selector, mo) {
-  const period = periodFor(mo.type, mo.speed);
-  if (mo.type === 'chase') {
-    return api('POST', `/lights/${enc(selector)}/effects/move`, { direction: mo.dir, period, power_on: true });
-  }
-  if (mo.type === 'breathe' || mo.type === 'pulse') {
-    return api('POST', `/lights/${enc(selector)}/effects/${mo.type}`, { color: mo.to, period, cycles: 100000, persist: false, power_on: true });
-  }
+  const req = motionRequest(mo);
+  return req && api('POST', `/lights/${enc(selector)}/effects/${req.effect}`, req.body);
 }
 
+// Paint cells along a set of strips, then optionally start the motion.
 async function paint(selector, pos, cells, level, effect = 'none') {
   step('stopping any animation…');
   await effectsOff(selector);
@@ -446,25 +313,69 @@ async function paint(selector, pos, cells, level, effect = 'none') {
   }
 }
 
-// Apply cells to a whole group and remember them (so the brightness slider
-// can rescale the pattern instead of flattening it).
-async function paintGroup(g, cells, effect = 'none') {
+// Apply cells to a whole group and remember what's now showing. The
+// brightness slider rescales it, the home screen names it, and a schedule set
+// to "whatever you played last" fades it on in the evening.
+async function paintGroup(g, cells, effect = 'none', what = {}) {
   const p = gp(g.id);
   await paint(`group_id:${g.id}`, positions(g.lights, g.id), cells, p.level, effect);
-  p.last = { cells, effect };
+  p.last = { cells, effect: normalizeMotion(effect), name: what.name || 'Custom colours', id: what.id || null, at: Date.now() };
   saveGroupPrefs();
 }
 
 function applyToGroup(g, pattern) {
   const n = positions(g.lights, g.id).length;
-  return paintGroup(g, patternCells(pattern, g.id, n), normalizeMotion(pattern.effect, pattern.motion));
+  return paintGroup(g, patternCells(pattern, g.id, n), patternMotion(pattern), { name: pattern.name, id: pattern.id });
+}
+
+// A pattern's name as shown everywhere: saved patterns get a star.
+const isSavedId = id => !!id && !id.startsWith('b-');
+const patternLabel = (name, id) => (isSavedId(id) ? `⭐ ${name}` : name);
+
+// What a group is showing right now: the schedule's pattern while its
+// evening runs (unless something was played since it faded on), otherwise
+// whatever was played last. Returns { name, id, cells, effect, scheduled,
+// until, tz } or null when unknown.
+function showing(g) {
+  const p = gp(g.id);
+  const last = p.last?.cells ? p.last : null;
+  const s = schedules[g.id];
+  if (s?.location) {
+    const now = new Date();
+    const plan = core.currentPlan(s, now);
+    const tz = s.location.tz;
+    if (!plan.skip && now >= plan.fadeInStart && now < plan.offAt) {
+      if (!last || (last.at || 0) < plan.fadeInStart.getTime()) {
+        const pt = scheduledPattern(g, s);
+        const n = positions(g.lights, g.id).length;
+        return {
+          name: pt ? pt.name : s.pattern.name, id: pt?.id || null,
+          cells: pt ? patternCells(pt, g.id, n) : null, effect: pt ? patternMotion(pt) : s.pattern.motion,
+          scheduled: true, until: plan.fadeOutStart, tz,
+        };
+      }
+      if (now < plan.fadeOutStart) return { ...last, until: plan.fadeOutStart, tz };
+    }
+  }
+  return last;
+}
+
+// The pattern a schedule points at, as it is now (null if it can't be found
+// on this phone, e.g. someone else's saved pattern).
+function scheduledPattern(g, s) {
+  return resolvePattern(s.pattern, { prefs: gp(g.id), savedPatterns: saved });
+}
+
+function scheduledName(g, s) {
+  const pt = scheduledPattern(g, s);
+  return pt ? patternLabel(pt.name, pt.id) : s.pattern.name;
 }
 
 function applyToStrip(g, light, pattern) {
   const pos = positions([light], g.id);
   gp(g.id).last = null; // the group is now mixed
   saveGroupPrefs();
-  return paint(`id:${light.id}`, pos, patternCells(pattern, g.id, pos.length), 1, normalizeMotion(pattern.effect, pattern.motion));
+  return paint(`id:${light.id}`, pos, patternCells(pattern, g.id, pos.length), 1, patternMotion(pattern));
 }
 
 // Identify strips: each strip a solid colour, its light #1 bright white.
@@ -597,10 +508,13 @@ function groupCard(g) {
     online.length < g.lights.length ? `${g.lights.length - online.length} offline` : null,
   ].filter(Boolean).join(' · ');
 
-  const brightnessValue = p.last ? Math.round(p.level * 100)
-    : Math.round(Math.max(0, ...online.map(l => l.brightness || 0)) * 100);
+  const now = showing(g);
+  const brightnessValue = now?.scheduled ? Math.round(schedules[g.id].level * 100)
+    : now ? Math.round(p.level * 100)
+      : Math.round(Math.max(0, ...online.map(l => l.brightness || 0)) * 100);
 
-  const solid = (c, label) => run(`${g.name} → ${label}`, () => paintGroup(g, tile([cell(c)], n)));
+  const solid = (c, label) => run(`${g.name} → ${label}`, () => paintGroup(g, tile([cell(c)], n), 'none', { name: label }));
+  const isShowing = pt => !!now && (now.id ? now.id === pt.id : now.name === pt.name);
 
   const card = el('div', { class: 'card group' },
     el('div', { class: 'light-head' },
@@ -612,16 +526,18 @@ function groupCard(g) {
       type: 'range', min: 1, max: 100, value: brightnessValue || 1, 'aria-label': `${g.name} brightness`, disabled: !online.length,
       onchange: e => {
         const v = e.target.value / 100;
-        if (p.last) {
+        if (now?.cells) {
+          // Rescale the pattern that's showing instead of flattening it.
           p.level = v;
           saveGroupPrefs();
-          run(`${g.name} brightness ${e.target.value}%`, () => paintGroup(g, p.last.cells, p.last.effect));
+          run(`${g.name} brightness ${e.target.value}%`, () => paintGroup(g, now.cells, now.effect, { name: now.name, id: now.id }));
         } else {
           run(`${g.name} brightness ${e.target.value}%`, () => setState(sel, { power: 'on', brightness: v }));
         }
       },
     }));
 
+  if (on && now) card.append(nowShowingLine(now));
   if (!online.length) return card;
 
   const anyColour = g.lights.some(hasColor);
@@ -633,13 +549,13 @@ function groupCard(g) {
     ]),
     el('h3', { text: 'Patterns' }),
     chips([
-      ...BUILTIN.map(pt => el('button', { onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, pt.name)),
-      ...saved.map(pt => el('button', { class: 'saved', onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, `⭐ ${pt.name}`)),
+      ...BUILTIN.map(pt => el('button', { class: isShowing(pt) ? 'active' : '', 'aria-pressed': String(isShowing(pt)), onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, pt.name)),
+      ...saved.map(pt => el('button', { class: 'saved' + (isShowing(pt) ? ' active' : ''), 'aria-pressed': String(isShowing(pt)), onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, `⭐ ${pt.name}`)),
     ]),
     el('button', { class: 'primary wide', style: 'margin-top:12px', onclick: () => openMaker(g.id) }, '✏️ Make or edit a pattern'),
     el('div', { class: 'row', style: 'margin-top:10px' },
-      el('button', { onclick: () => run(`Chase · ${g.name}`, () => chase(sel)) }, '▶︎ Chase'),
-      el('button', { onclick: () => run(`Stop · ${g.name}`, () => effectsOff(sel)) }, '■ Stop')),
+      el('button', { onclick: () => run(`Chase · ${g.name}`, async () => { await chase(sel); setLastMotion(g, normalizeMotion('chase')); }) }, '▶︎ Chase'),
+      el('button', { onclick: () => run(`Stop · ${g.name}`, async () => { await effectsOff(sel); setLastMotion(g, normalizeMotion('none')); }) }, '■ Stop')),
     !demo && scheduleRow(g));
 
   if (multi && !p.ordered) {
@@ -663,6 +579,39 @@ function groupCard(g) {
     card.append(fold(`${g.id}:order`, 'Strip order', ...orderEditor(g)));
   }
   return card;
+}
+
+// Chase / Stop change the motion of what's showing; remember it, so
+// "whatever you played last" brings it back the same way.
+function setLastMotion(g, mo) {
+  const p = gp(g.id);
+  if (!p.last?.cells) return;
+  p.last = { ...p.last, effect: mo, at: Date.now() };
+  saveGroupPrefs();
+}
+
+// A small strip of colour previewing cells (sampled down to fit).
+function previewStrip(cells, max = 36) {
+  const box = el('span', { class: 'preview-strip', 'aria-hidden': 'true' });
+  if (!cells?.length) { box.classList.add('unknown'); return box; }
+  const step = Math.max(1, cells.length / max);
+  for (let i = 0; i < cells.length && box.childElementCount < max; i += step) {
+    const x = cells[Math.floor(i)];
+    box.append(el('span', { style: x.b > 0 ? `background:${cellCss(x)};opacity:${Math.max(0.35, Math.min(1, x.b * 1.5))}` : 'background:#1b1d23' }));
+  }
+  return box;
+}
+
+function nowShowingLine(now) {
+  const t = d => fmtTime(d, now.tz);
+  const detail = now.scheduled ? `From your schedule · fades off at ${t(now.until)}`
+    : now.until ? `Until the ${t(now.until)} fade-off` : '';
+  return el('div', { class: 'now-line' },
+    previewStrip(now.cells),
+    el('span', { class: 'now-text' },
+      el('span', { class: 'muted small', text: 'Showing' }),
+      el('strong', { text: patternLabel(now.name, now.id) }),
+      detail && el('span', { class: 'muted small', text: detail })));
 }
 
 function stripCard(g, light) {
@@ -1148,11 +1097,6 @@ function makerPattern() {
 // fading off at a set time. The server runs it; the app shows the evening as a
 // timeline so you can see exactly what will happen tonight.
 
-async function loadCore() {
-  core ??= await import(`/shared/schedule-core.js?v=${APP_VERSION}`);
-  return core;
-}
-
 const scheduleId = gid => `s-${gid}`.slice(0, 32);
 
 function fmtTime(d, tz) {
@@ -1179,6 +1123,38 @@ function eveningSummary(s) {
   return `Tonight · on ${t(plan.fadeInStart)} → ${t(plan.fullOn)} · off ${t(plan.fadeOutStart)} → ${t(plan.offAt)}`;
 }
 
+// The schedule line on a group card: what tonight brings, at a glance.
+function tonightText(g, s) {
+  const name = scheduledName(g, s);
+  if (!s.enabled) return { title: 'Schedule paused', detail: `${name} · fades on at sunset when switched on` };
+  if (!s.location) return { title: 'Schedule', detail: 'Needs the house location' };
+  const tz = s.location.tz;
+  const t = d => fmtTime(d, tz);
+  const now = new Date();
+  const current = core.currentPlan(s, now);
+  const next = core.nextRun(s, now);
+  if (current.skip) {
+    const when = next && new Date(next.fullOn).toLocaleDateString([], { weekday: 'long', timeZone: tz });
+    return { title: SKIP_TEXT[current.skip] || 'Off tonight', detail: next ? `Next: ${when} · ${name}` : name };
+  }
+  if (!next) return { title: 'Schedule', detail: name };
+  // Something was played after tonight's fade-on started: that stays until the fade-off.
+  const playedAt = gp(g.id).last?.at || 0;
+  if (now >= next.fadeInStart && now < next.fadeOutStart && playedAt > next.fadeInStart.getTime()) {
+    return { title: `Fades off at ${t(next.fadeOutStart)}`, detail: `Showing what you picked instead of ${name} · off by ${t(next.offAt)}` };
+  }
+  if (now >= next.fadeOutStart) return { title: `Fading off · ${name}`, detail: `Off by ${t(next.offAt)}` };
+  if (now >= next.fullOn) return { title: `On now · ${name}`, detail: `Fades off ${t(next.fadeOutStart)} → ${t(next.offAt)}` };
+  if (now >= next.fadeInStart) return { title: `Fading on · ${name}`, detail: `Fully on ${t(next.fullOn)} · fades off ${t(next.fadeOutStart)}` };
+  const day = next.date === current.date ? 'Tonight'
+    : next.date === core.ymd(core.addDays(core.zonedParts(now, tz), 1)) ? 'Tomorrow'
+      : new Date(next.fullOn).toLocaleDateString([], { weekday: 'long', timeZone: tz });
+  return {
+    title: `${day} · ${name}`,
+    detail: `Fades on ${t(next.fadeInStart)} → ${t(next.fullOn)} · off ${t(next.fadeOutStart)} → ${t(next.offAt)}`,
+  };
+}
+
 function scheduleRow(g) {
   const s = schedules[g.id];
   if (!s) {
@@ -1187,10 +1163,11 @@ function scheduleRow(g) {
       el('span', { class: 'grow' }, el('strong', { text: 'Add a schedule' }), el('span', { class: 'muted small', text: 'Fade on at sunset, fade off at bedtime' })),
       el('span', { class: 'chev', text: '›' }));
   }
-  const row = el('div', { class: 'schedule-row' + (s.enabled ? '' : ' paused') },
-    el('button', { class: 'sched-open', onclick: () => openSchedule(g) },
+  const { title, detail } = tonightText(g, s);
+  return el('div', { class: 'schedule-row' + (s.enabled ? '' : ' paused') },
+    el('button', { class: 'sched-open', 'aria-label': `Schedule: ${title}. ${detail}`, onclick: () => openSchedule(g) },
       el('span', { class: 'sched-icon', text: '🌙' }),
-      el('span', { class: 'grow' }, el('strong', { text: 'Schedule' }), el('span', { class: 'muted small', text: s.enabled ? eveningSummary(s) : 'Paused' }))),
+      el('span', { class: 'grow' }, el('strong', { text: title }), el('span', { class: 'muted small', text: detail }))),
     toggleSwitch(s.enabled, false, async e => {
       const enabled = e.target.checked;
       try {
@@ -1200,24 +1177,29 @@ function scheduleRow(g) {
       } catch (err) { showActivity(err.message, 'err'); }
       renderMain();
     }));
-  return row;
 }
 
 let sched = null; // the schedule being edited: { g, s, dirty }
 
 async function openSchedule(g) {
-  await loadCore();
   const existing = schedules[g.id];
-  const defaultPattern = saved[0] || BUILTIN[0];
   const s = existing ? clone(existing) : {
     ...clone(core.DEFAULT_SCHEDULE),
     id: scheduleId(g.id),
     groupId: g.id,
     groupName: g.name,
     location: Object.values(schedules).find(x => x.location)?.location || null,
-    pattern: { name: defaultPattern.name, motion: normalizeMotion(defaultPattern.effect, defaultPattern.motion) },
+    // New schedules fade on whatever was played last, so they never surprise you.
+    pattern: { source: 'last', name: 'Last played' },
   };
-  sched = { g, s, isNew: !existing, start: JSON.stringify(s) };
+  // Schedules from before patterns were linked kept only a name: link them up.
+  if (!s.pattern.source) {
+    const b = BUILTIN.find(x => x.name === s.pattern.name);
+    const mine = saved.find(x => x.name === s.pattern.name);
+    if (b) s.pattern = { ...s.pattern, source: 'builtin', id: b.id };
+    else if (mine) s.pattern = { ...s.pattern, source: 'saved', id: mine.id };
+  }
+  sched = { g, s, isNew: !existing, start: JSON.stringify(s), picking: false };
   show('sched');
   window.scrollTo(0, 0);
   renderSchedule();
@@ -1230,8 +1212,76 @@ function closeSchedule(force = false) {
   renderMain();
 }
 
-function patternChoices() {
-  return [...saved.map(p => ({ ...p, label: `⭐ ${p.name}` })), ...BUILTIN.map(p => ({ ...p, label: p.name }))];
+// ----- The schedule's pattern picker -----
+// A schedule only chooses a pattern; patterns are made in the pattern maker.
+
+const sameRef = (a, b) => a.source === b.source && (a.source === 'last' || (a.source ? a.id === b.id : a.name === b.name));
+
+// Everything the schedule can show, as picker options.
+function patternOptions(g) {
+  const p = gp(g.id);
+  const n = positions(g.lights, g.id).length;
+  const ref = sched.s.pattern;
+  const last = p.last?.cells ? p.last : null;
+  const opts = [{
+    ref: { source: 'last', name: 'Last played' },
+    label: '↺ Last played',
+    sub: last ? `Right now: ${patternLabel(last.name, last.id)} · follows what you play` : 'Nothing played yet, so ✨ Warm bulbs until you do',
+    cells: last ? last.cells : patternCells(BUILTIN[0], g.id, n),
+    group: null,
+  }];
+  // A saved pattern this phone can't see (someone else's, or deleted).
+  if ((ref.source === 'saved' && !saved.some(x => x.id === ref.id)) || !ref.source) {
+    opts.push({
+      ref, label: `⭐ ${ref.name}`, cells: null, group: null,
+      sub: ref.owner && ref.owner !== me?.id ? 'Chosen by someone else in the family' : 'Deleted · uses the colours it had when you chose it',
+    });
+  }
+  for (const pt of saved) {
+    opts.push({ ref: { source: 'saved', id: pt.id, name: pt.name }, label: `⭐ ${pt.name}`, cells: patternCells(pt, g.id, n), group: 'Your patterns', motion: patternMotion(pt) });
+  }
+  for (const pt of BUILTIN) {
+    opts.push({ ref: { source: 'builtin', id: pt.id, name: pt.name }, label: pt.name, cells: patternCells(pt, g.id, n), group: 'Built in' });
+  }
+  return opts;
+}
+
+const MOTION_TEXT = { chase: 'Chases', breathe: 'Breathes', pulse: 'Pulses' };
+
+function renderPatternPicker() {
+  const { g, s } = sched;
+  const opts = patternOptions(g);
+  const chosen = opts.find(o => sameRef(o.ref, s.pattern)) || opts[0];
+  const btn = $('#sched-pattern');
+  btn.setAttribute('aria-expanded', String(sched.picking));
+  btn.replaceChildren(
+    previewStrip(chosen.cells),
+    el('span', { class: 'grow' }, el('strong', { text: chosen.label }), el('span', { class: 'muted small', text: chosen.sub || (chosen.group === 'Your patterns' ? 'Your pattern' : chosen.group) || '' })),
+    el('span', { class: 'chev', text: '›' }));
+  const list = $('#sched-pattern-list');
+  list.hidden = !sched.picking;
+  if (!sched.picking) { list.replaceChildren(); return; }
+  const rows = [];
+  let group;
+  for (const o of opts) {
+    if (o.group && o.group !== group) rows.push(el('div', { class: 'pick-group', text: o.group }));
+    group = o.group || group;
+    const active = o === chosen;
+    rows.push(el('button', {
+      class: 'pick-option' + (active ? ' active' : ''), role: 'radio', 'aria-checked': String(active),
+      onclick: () => {
+        sched.picking = false;
+        setSched({ pattern: { ...o.ref } });
+        $('#sched-pattern').focus();
+      },
+    },
+    previewStrip(o.cells),
+    el('span', { class: 'grow' },
+      el('strong', { text: o.label }),
+      (o.sub || MOTION_TEXT[o.motion?.type]) && el('span', { class: 'muted small', text: o.sub || MOTION_TEXT[o.motion.type] })),
+    el('span', { class: 'check', text: active ? '✓' : '' })));
+  }
+  list.replaceChildren(...rows);
 }
 
 function renderSchedule() {
@@ -1256,14 +1306,8 @@ function renderSchedule() {
   $('#off-fade').value = s.off.fadeMin;
   $('#off-fade-label').textContent = s.off.fadeMin ? `Fade out over ${fmtDur(s.off.fadeMin)}` : 'Turn off instantly';
 
-  // What to show
-  $('#sched-patterns').replaceChildren(...patternChoices().map(p => el('button', {
-    class: 'small' + (p.name === s.pattern.name ? ' active' : ''),
-    onclick: () => {
-      s.pattern = { name: p.name, motion: normalizeMotion(p.effect, p.motion) };
-      renderSchedule();
-    },
-  }, p.label)));
+  // Pattern
+  renderPatternPicker();
   $('#sched-level').value = Math.round(s.level * 100);
   $('#sched-level-label').textContent = `${Math.round(s.level * 100)}%`;
 
@@ -1398,16 +1442,39 @@ function setSched(change) {
   renderSchedule();
 }
 
+// The server works out the pattern's colours when it fades the lights on, so
+// edits in the pattern maker are picked up. It also keeps these colours, used
+// only if the pattern can't be found then (e.g. it was deleted).
+function scheduleSnapshot(g, ref) {
+  const pt = resolvePattern(ref, { prefs: gp(g.id), savedPatterns: saved });
+  if (!pt && ref.states?.length) return { name: ref.name, states: ref.states, motion: ref.motion }; // someone else's: keep it
+  const use = pt || BUILTIN[0];
+  const pos = positions(g.lights, g.id);
+  return {
+    name: ref.source === 'last' ? (pt ? pt.name : 'Last played') : use.name,
+    states: cellsToStates(pos, patternCells(use, g.id, pos.length), 1),
+    motion: patternMotion(use),
+  };
+}
+
+// After a saved pattern changes, refresh the stand-in colours of this house's
+// schedules that use it (the schedule itself already follows the pattern).
+async function refreshSchedulesUsing(patternId) {
+  for (const [gid, s] of Object.entries(schedules)) {
+    const g = groupById(gid);
+    if (!g || s.pattern.source !== 'saved' || s.pattern.id !== patternId) continue;
+    try {
+      const res = await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: { ...s, pattern: { ...s.pattern, ...scheduleSnapshot(g, s.pattern) } } });
+      schedules[gid] = res.schedule;
+    } catch { /* the schedule still follows the pattern; only the stand-in is older */ }
+  }
+}
+const schedulesUsing = patternId => Object.values(schedules).filter(s => s.pattern.source === 'saved' && s.pattern.id === patternId);
+
 async function saveSchedule() {
   const { g, s } = sched;
   if (!s.location) { alert('Add the house location first, so the app knows when sunset is.'); return; }
-  const pattern = patternChoices().find(p => p.name === s.pattern.name) || BUILTIN[0];
-  const pos = positions(g.lights, g.id);
-  const cells = patternCells(pattern, g.id, pos.length);
-  const body = {
-    ...s,
-    pattern: { name: pattern.name, states: cellsToStates(pos, cells, 1), motion: normalizeMotion(pattern.effect, pattern.motion) },
-  };
+  const body = { ...s, pattern: { ...s.pattern, ...scheduleSnapshot(g, s.pattern) } };
   const btn = $('#sched-save');
   btn.disabled = true;
   try {
@@ -1680,7 +1747,6 @@ async function setActive(h) {
     const [p, sc] = await Promise.all([
       server('GET', `prefs/house/${h.key}`),
       server('GET', `schedules/${h.key}`),
-      loadCore(),
     ]);
     if (house !== h) return; // switched again meanwhile
     groupPrefs = p.prefs.groups || {};
@@ -1882,7 +1948,8 @@ $('#maker-preview').addEventListener('click', () => {
   const cells = makerCells(m);
   const key = sendKey(m);
   run(`Show on house · ${g.name}`, async () => {
-    await paintGroup(g, cells, m.motion);
+    const unchanged = m.editingId && !isDirty();
+    await paintGroup(g, cells, m.motion, unchanged ? { name: m.name, id: m.editingId } : { name: m.name ? `${m.name} (edited)` : 'New pattern' });
     m.sent = key;
   }).then(() => { if (maker === m) renderShowButton(); });
 });
@@ -1899,12 +1966,20 @@ $('#maker-save').addEventListener('click', () => {
   maker.editingId = pt.id;
   maker.savedState = editState();
   renderMaker();
-  showActivity(`✓ Saved “${pt.name}” — it’s in your Patterns`, 'ok');
+  const using = schedulesUsing(pt.id);
+  showActivity(using.length
+    ? `✓ Saved “${pt.name}” · your ${using.map(s => s.groupName).join(' & ')} schedule uses the new version`
+    : `✓ Saved “${pt.name}” — it’s in your Patterns`, 'ok');
+  if (using.length) { flushSync('prefs/user'); refreshSchedulesUsing(pt.id); }
 });
 $('#maker-share').addEventListener('click', () => sharePattern(makerPattern()));
 $('#maker-delete').addEventListener('click', () => {
   const pt = saved.find(p => p.id === maker.editingId);
-  if (!pt || !confirm(`Delete the pattern “${pt.name}”?`)) return;
+  const using = schedulesUsing(pt?.id);
+  const warning = using.length
+    ? `\n\nYour ${using.map(s => s.groupName).join(' & ')} schedule uses it. It will keep using the colours it has now until you pick another pattern for it.`
+    : '';
+  if (!pt || !confirm(`Delete the pattern “${pt.name}”?${warning}`)) return;
   saved = saved.filter(p => p.id !== pt.id);
   savePatterns();
   showActivity(`Deleted “${pt.name}”`, 'ok');
@@ -1913,6 +1988,7 @@ $('#maker-delete').addEventListener('click', () => {
 
 // Schedule controls
 $('#sched-back').addEventListener('click', () => closeSchedule());
+$('#sched-pattern').addEventListener('click', () => { sched.picking = !sched.picking; renderPatternPicker(); });
 $('#sched-save').addEventListener('click', saveSchedule);
 document.querySelectorAll('#on-mode button').forEach(b => b.addEventListener('click', () => setSched({ on: { ...sched.s.on, mode: b.dataset.mode } })));
 $('#on-offset').addEventListener('input', e => setSched({ on: { ...sched.s.on, offsetMin: +e.target.value } }));

@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-6">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-7">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -229,13 +229,14 @@
     </div>
 
     <div class="card">
-      <h3 class="first">What to show</h3>
-      <div id="sched-patterns" class="chip-scroll"></div>
+      <h3 class="first">Pattern</h3>
+      <button id="sched-pattern" class="pick-row" aria-expanded="false" aria-controls="sched-pattern-list"></button>
+      <div id="sched-pattern-list" class="pick-list" role="radiogroup" aria-label="Pattern" hidden></div>
       <div class="field">
         <div class="field-label"><span>Brightness when fully on</span><strong id="sched-level-label"></strong></div>
         <input id="sched-level" type="range" min="10" max="100" step="5" aria-label="Brightness when fully on">
       </div>
-      <p class="muted small">Uses your current strip order. Motion like Chase starts once the lights are fully on.</p>
+      <p class="muted small">Make and edit patterns in the pattern maker. Changes there are used here automatically. Motion like Chase starts once the lights are fully on.</p>
     </div>
 
     <div class="card">
@@ -297,6 +298,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-6"></script>
+  <script type="module" src="app.js?v=2026.11.24-7"></script>
 </body>
 </html>

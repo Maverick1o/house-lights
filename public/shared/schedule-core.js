@@ -193,26 +193,3 @@ export function dueEvents(s, now, windowMs = 20 * 60000) {
   }
   return out;
 }
-
-// ---------- Motion ----------
-
-const PERIODS = {
-  chase: { slow: 8, fast: 0.3 },
-  breathe: { slow: 10, fast: 1 },
-  pulse: { slow: 3, fast: 0.25 },
-};
-export const periodFor = (type, speed) => {
-  const p = PERIODS[type];
-  return p && Math.round(p.slow * (p.fast / p.slow) ** speed * 100) / 100;
-};
-
-/** The LIFX effect call for a motion setting, or null for "steady". */
-export function motionRequest(mo) {
-  if (!mo || mo.type === 'none') return null;
-  const period = periodFor(mo.type, mo.speed);
-  if (mo.type === 'chase') return { effect: 'move', body: { direction: mo.dir === 'backward' ? 'backward' : 'forward', period, power_on: true } };
-  if (mo.type === 'breathe' || mo.type === 'pulse') {
-    return { effect: mo.type, body: { color: mo.to, period, cycles: 100000, persist: false, power_on: true } };
-  }
-  return null;
-}

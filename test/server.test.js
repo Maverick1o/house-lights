@@ -548,3 +548,71 @@ test('a fade that fails (lights offline) is retried on the next tick', async () 
   const again = await (await tickReq(first.app, 'good-b')).json();
   assert.equal(again.ran[0].kind, 'fade-out', 'tried again');
 });
+
+test('a schedule shows its pattern as it is at fade-in, not a stale copy', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  const candy = { id: 'p-candy', name: 'Candy', loop: [{ c: 'hue:0 saturation:1', b: 1 }], motion: { type: 'none' } };
+  await admin.call('PUT', 'prefs/user', { prefs: { patterns: [candy] } });
+  const saved = await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...schedule().pattern, source: 'saved', id: 'p-candy', name: 'Candy' } }) });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  // Edit the pattern after the schedule was saved: now blue, and breathing.
+  await admin.call('PUT', 'prefs/user', { prefs: { patterns: [{ ...candy, loop: [{ c: 'hue:225 saturation:1', b: 1 }], motion: { type: 'breathe', speed: 0.5 } }] } });
+
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  setClock(plan.fadeInStart.getTime() + 60000);
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-live-1');
+  const up = lifxCalls.filter(c => c.body?.states).at(-1);
+  assert.deepEqual(up.body.states, [{ selector: 'id:d073', color: 'hue:225 saturation:1', brightness: 0.8 }]);
+  setClock(plan.fullOn.getTime() + 60000);
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-live-2');
+  assert.match(lifxCalls.at(-1).url, /effects\/breathe$/, 'uses the edited motion');
+});
+
+test('"whatever you played last" uses the house’s last-played pattern, and falls back when there is none', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...schedule().pattern, source: 'last', name: 'Last played' } }) });
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+
+  setClock(plan.fadeInStart.getTime() + 60000);
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-last-1');
+  assert.equal(lifxCalls.filter(c => c.body?.states).at(-1).body.states.length, 2, 'nothing played yet: the saved colours');
+
+  await admin.call('PUT', 'prefs/house/home', { prefs: { groups: { 'g-holiday': { last: { name: 'Snow', cells: [{ c: 'kelvin:4000 saturation:0', b: 1 }], effect: { type: 'none' }, at: 1 } } } } });
+  setClock(plan.fadeInStart.getTime() + 86400000 + 60000); // the next evening
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-last-2');
+  assert.deepEqual(lifxCalls.filter(c => c.body?.states).at(-1).body.states.map(s => s.color), ['kelvin:4000 saturation:0']);
+});
+
+test('a deleted pattern falls back to the colours saved with the schedule', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...schedule().pattern, source: 'saved', id: 'p-gone', name: 'Gone' } }) });
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  setClock(plan.fadeInStart.getTime() + 60000);
+  lifxCalls.length = 0;
+  const r = await (await tickReq(app, 'good-gone')).json();
+  assert.equal(r.ran[0].error, undefined);
+  assert.deepEqual(lifxCalls.filter(c => c.body?.states).at(-1).body.states.map(s => s.selector), ['id:d073|0-4', 'id:d073|5-9']);
+});
+
+test('a saved pattern stays its owner’s when someone else edits the schedule', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  const { person } = await invitePerson(app, admin, ['home']);
+  const ref = { ...schedule().pattern, source: 'saved', id: 'p-candy', name: 'Candy' };
+  const first = await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...ref, owner: 'someone-else' } }) });
+  const ownerId = first.body.schedule.pattern.owner;
+  assert.notEqual(ownerId, 'someone-else', 'the owner can’t be chosen by the phone');
+  const edited = await person.call('PUT', 'schedules/home/evening01', { schedule: schedule({ level: 0.5, pattern: ref }) });
+  assert.equal(edited.body.schedule.pattern.owner, ownerId);
+  const switched = await person.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...ref, id: 'p-theirs' } }) });
+  assert.notEqual(switched.body.schedule.pattern.owner, ownerId);
+  assert.equal((await person.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...ref, source: 'moon' } }) })).status, 400);
+});
+
