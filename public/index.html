@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-4">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-5">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -130,10 +130,10 @@
         </div>
         <div class="opt-row">
           <span class="muted small">Speed</span>
-          <div id="speed-seg" class="segmented three" role="group" aria-label="Speed">
-            <button data-speed="slow">Slow</button>
-            <button data-speed="medium">Medium</button>
-            <button data-speed="fast">Fast</button>
+          <div class="speed-control">
+            <span class="muted small">Slow</span>
+            <input id="speed-slider" type="range" min="0" max="100" step="1" value="50" aria-label="Speed, slow to fast">
+            <span class="muted small">Fast</span>
           </div>
         </div>
         <div id="to-row" class="opt-row column">
@@ -203,6 +203,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-4"></script>
+  <script src="app.js?v=2026.11.24-5"></script>
 </body>
 </html>

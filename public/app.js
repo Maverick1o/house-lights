@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2026.11.24-4';
+const APP_VERSION = '2026.11.24-5';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
@@ -395,10 +395,18 @@ async function sendStates(states, what) {
 // Motion: what the lights do after a pattern is painted.
 //   { type: 'none' | 'chase' | 'breathe' | 'pulse', dir, speed, to }
 // Older patterns stored just a string ('chase', 'chase-back', …); both work.
-const SPEEDS = {
-  chase: { slow: 4, medium: 2, fast: 0.8 },     // seconds per step around the strip
-  breathe: { slow: 6, medium: 3, fast: 1.5 },   // seconds per fade in and out
-  pulse: { slow: 2, medium: 1, fast: 0.5 },     // seconds per blink
+// Speed is a slider from 0 (slowest) to 1 (fastest). It maps to the LIFX
+// "period" (seconds per cycle) on a curve, so every step of the slider feels
+// like a similar change in speed.
+const PERIODS = {
+  chase: { slow: 8, fast: 0.3 },     // seconds per step along the strip
+  breathe: { slow: 10, fast: 1 },    // seconds per fade in and out
+  pulse: { slow: 3, fast: 0.25 },    // seconds per blink
+};
+const OLD_SPEEDS = { slow: 0.2, medium: 0.5, fast: 0.8 }; // patterns saved before the slider
+const periodFor = (type, speed) => {
+  const p = PERIODS[type];
+  return p && Math.round(p.slow * (p.fast / p.slow) ** speed * 100) / 100;
 };
 const DEFAULT_TO = 'brightness:0.05';
 function normalizeMotion(effect, motion = {}) {
@@ -407,14 +415,15 @@ function normalizeMotion(effect, motion = {}) {
   return {
     type,
     dir: effect === 'chase-back' || motion.dir === 'backward' ? 'backward' : 'forward',
-    speed: ['slow', 'medium', 'fast'].includes(motion.speed) ? motion.speed : 'medium',
+    speed: typeof motion.speed === 'number' && motion.speed >= 0 && motion.speed <= 1 ? motion.speed
+      : OLD_SPEEDS[motion.speed] ?? 0.5,
     to: typeof motion.to === 'string' && motion.to.length < 60 ? motion.to : DEFAULT_TO,
   };
 }
 const legacyEffect = mo => (mo.type === 'chase' ? (mo.dir === 'backward' ? 'chase-back' : 'chase') : mo.type);
 
 function startMotion(selector, mo) {
-  const period = SPEEDS[mo.type]?.[mo.speed];
+  const period = periodFor(mo.type, mo.speed);
   if (mo.type === 'chase') {
     return api('POST', `/lights/${enc(selector)}/effects/move`, { direction: mo.dir, period, power_on: true });
   }
@@ -841,7 +850,7 @@ function renderMotion() {
   $('#motion-options').hidden = mo.type === 'none';
   $('#dir-row').hidden = mo.type !== 'chase';
   mark('#dir-seg button', 'dir', mo.dir);
-  mark('#speed-seg button', 'speed', mo.speed);
+  $('#speed-slider').value = Math.round(mo.speed * 100);
   $('#to-row').hidden = mo.type === 'chase';
   $('#to-label').textContent = mo.type === 'pulse' ? 'Blinks to' : 'Fades to';
   $('#to-swatches').replaceChildren(...FADE_TO.map(c => el('button', {
@@ -1557,7 +1566,21 @@ $('#overrides-reset').addEventListener('click', () => {
 });
 document.querySelectorAll('#effect-seg button').forEach(b => b.addEventListener('click', () => setMotion({ type: b.dataset.kind })));
 document.querySelectorAll('#dir-seg button').forEach(b => b.addEventListener('click', () => setMotion({ dir: b.dataset.dir })));
-document.querySelectorAll('#speed-seg button').forEach(b => b.addEventListener('click', () => setMotion({ speed: b.dataset.speed })));
+// Dragging the speed slider is one undo step, saved when you let go.
+let speedDragStart = null;
+$('#speed-slider').addEventListener('input', e => {
+  if (!speedDragStart) speedDragStart = JSON.stringify({ seq: maker.seq, overrides: maker.overrides, motion: maker.motion });
+  maker.motion = { ...maker.motion, speed: e.target.value / 100 };
+  renderHeader();
+  renderShowButton();
+});
+$('#speed-slider').addEventListener('change', () => {
+  if (speedDragStart) {
+    maker.history.push(speedDragStart);
+    speedDragStart = null;
+    renderHeader();
+  }
+});
 $('#maker-preview').addEventListener('click', () => {
   const m = maker;
   const g = groupById(m.gid);

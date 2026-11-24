@@ -298,3 +298,7 @@ body.sheet-open #maker { padding-bottom: 260px; }
 
 .cell.selected { outline: 3px solid #fff; outline-offset: 2px; z-index: 1; position: relative; }
 .grid.house .cell.selected { outline-offset: 1px; }
+
+/* ---------- Speed slider ---------- */
+.speed-control { display: flex; align-items: center; gap: 10px; }
+.speed-control input[type=range] { flex: 1; min-height: 40px; touch-action: pan-y; }
