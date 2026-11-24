@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-9">
+  <meta name="app-version" content="2026.11.24-11">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-9">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-11">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -75,6 +75,32 @@
     </div>
   </section>
 
+  <!-- Pattern library -->
+  <section id="library" class="screen" hidden>
+    <header class="maker-head">
+      <button id="library-back" class="icon-btn" aria-label="Back">‹</button>
+      <div class="title-btn" role="heading" aria-level="1">
+        <span class="title-line"><span>Patterns</span></span>
+        <span id="library-sub" class="muted small"></span>
+      </div>
+      <span class="icon-btn" aria-hidden="true"></span>
+    </header>
+    <div id="library-body" class="library"></div>
+  </section>
+
+  <!-- Group settings: strips and their order -->
+  <section id="group" class="screen" hidden>
+    <header class="maker-head">
+      <button id="group-back" class="icon-btn" aria-label="Back">‹</button>
+      <div class="title-btn" role="heading" aria-level="1">
+        <span class="title-line"><span id="group-title">Group</span></span>
+        <span id="group-sub" class="muted small"></span>
+      </div>
+      <span class="icon-btn" aria-hidden="true"></span>
+    </header>
+    <div id="group-body"></div>
+  </section>
+
   <!-- Pattern maker -->
   <section id="maker" class="screen" hidden>
     <header class="maker-head">
@@ -98,11 +124,31 @@
 
     <div class="card">
       <h3 class="first">Repeating pattern</h3>
-      <p class="muted small">Tap a light to choose its colour, or drag across several to change them together. This repeats all the way around your house.</p>
+      <p class="muted small">Tap a light to choose its color, or drag across several to change them together. This repeats all the way around your house.</p>
       <div id="seq-grid" class="grid seq"></div>
       <div class="seq-foot">
         <span id="seq-count" class="muted small"></span>
         <button id="seq-remove" class="link small">Remove last light</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Spacing</h3>
+      <div class="opt-row">
+        <span class="muted small">Lights per color</span>
+        <div class="stepper" role="group" aria-label="Lights per color">
+          <button id="width-minus" class="small" aria-label="Fewer lights per color">−</button>
+          <span id="width-val" aria-live="polite">1</span>
+          <button id="width-plus" class="small" aria-label="More lights per color">+</button>
+        </div>
+      </div>
+      <div class="opt-row">
+        <span class="muted small">Between colors</span>
+        <div id="gaps-seg" class="segmented three" role="group" aria-label="Between colors">
+          <button data-gaps="none">None</button>
+          <button data-gaps="off">Dark</button>
+          <button data-gaps="dim">Dim</button>
+        </div>
       </div>
     </div>
 
@@ -251,6 +297,7 @@
         <label class="small muted">To <input id="season-to" type="date"></label>
         <p class="muted small">Repeats every year.</p>
       </div>
+      <p id="sched-overlap" class="hint" hidden></p>
     </div>
 
     <div class="card">
@@ -267,6 +314,38 @@
       <button id="sched-delete" class="small danger" hidden>Delete schedule</button>
     </div>
   </section>
+
+  <!-- Color sheet: pick any color or white -->
+  <div id="sheet-scrim" class="scrim" hidden></div>
+  <div id="color-sheet" class="sheet color-sheet" role="dialog" aria-modal="true" aria-labelledby="cs-title" aria-hidden="true">
+    <div class="sheet-grab" aria-hidden="true"><span></span></div>
+    <div class="sheet-head">
+      <div class="grow"><strong id="cs-title">Pick a color</strong></div>
+      <button id="cs-close" class="icon-btn" aria-label="Close">✕</button>
+    </div>
+    <div class="cs-preview">
+      <span id="cs-swatch" class="cs-swatch" aria-hidden="true"></span>
+      <span id="cs-name" class="cs-name"></span>
+    </div>
+    <div id="cs-mode" class="segmented two" role="group" aria-label="Color or white">
+      <button data-mode="color">Color</button>
+      <button data-mode="white">White</button>
+    </div>
+    <div id="cs-color-fields" class="cs-fields">
+      <label class="muted small" for="cs-hue">Color</label>
+      <input id="cs-hue" class="hue-track" type="range" min="0" max="359" step="1">
+      <label class="muted small" for="cs-sat">Strength</label>
+      <input id="cs-sat" class="sat-track" type="range" min="5" max="100" step="1">
+    </div>
+    <div id="cs-white-fields" class="cs-fields" hidden>
+      <label class="muted small" for="cs-kelvin">Warm to cool</label>
+      <input id="cs-kelvin" class="kelvin-track" type="range" min="1500" max="9000" step="50">
+    </div>
+    <div class="cs-actions">
+      <button id="cs-fav" class="small">☆ Add to my colors</button>
+      <button id="cs-use" class="primary grow">Use this color</button>
+    </div>
+  </div>
 
   <!-- Houses & family -->
   <dialog id="settings">
@@ -291,6 +370,7 @@
     </div>
 
     <p class="muted small" id="settings-info" style="margin-top:16px"></p>
+    <p class="small timer-status" id="timer-status" hidden></p>
     <button id="refresh-btn">Refresh lights</button>
     <button id="signout-btn">Sign out</button>
     <button id="leave-demo" hidden>Leave demo mode</button>
@@ -299,6 +379,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-9"></script>
+  <script src="app.js?v=2026.11.24-11"></script>
 </body>
 </html>

@@ -105,7 +105,7 @@ function setup({ env = ENV, withStore = true, lifxFails = false } = {}) {
   const app = createApp({
     store, env, fetchImpl, now,
     verifyCron: async ({ signature, url }) => signature.startsWith('good') && url.endsWith('/api/cron/tick'),
-    timer: { configured: () => true, install: async destination => { timerInstalls.push(destination); } },
+    timer: { configured: () => true, install: async destination => { timerInstalls.push(destination); }, status: async () => ({ destination: timerInstalls.at(-1) || null, paused: false }) },
   });
   return { app, store, lifxCalls, timerInstalls, advance: ms => (clock += ms), setClock: t => (clock = t) };
 }
@@ -614,5 +614,35 @@ test('a saved pattern stays its owner’s when someone else edits the schedule',
   const switched = await person.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...ref, id: 'p-theirs' } }) });
   assert.notEqual(switched.body.schedule.pattern.owner, ownerId);
   assert.equal((await person.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...ref, source: 'moon' } }) })).status, 400);
+});
+
+test('a quiet schedule timer is set up again when the app opens, at most every 10 minutes', async () => {
+  const { app, timerInstalls, advance } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  assert.equal(timerInstalls.length, 1);
+  await tickReq(app, 'good-heal-1'); // the timer checks in
+  assert.equal((await admin.call('GET', 'schedules/home')).body.timer.repairing, undefined, 'healthy: left alone');
+  advance(20 * 60000); // …then goes quiet
+  const res = await admin.call('GET', 'schedules/home');
+  assert.equal(res.body.timer.repaired, true);
+  assert.equal(timerInstalls.length, 2);
+  await admin.call('GET', 'schedules/home');
+  assert.equal(timerInstalls.length, 2, 'not again straight away');
+  advance(11 * 60000);
+  await admin.call('GET', 'schedules/home');
+  assert.equal(timerInstalls.length, 3);
+});
+
+test('timer health is admin-only and reports schedules per house', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  const { person } = await invitePerson(app, admin, ['home']);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  assert.equal((await person.call('GET', 'timer')).status, 403);
+  const t = await admin.call('GET', 'timer');
+  assert.equal(t.status, 200);
+  assert.deepEqual(t.body.schedules, { home: 1, mom_and_dad: 0 });
+  assert.match(t.body.expected, /\/api\/cron\/tick$/);
 });
 

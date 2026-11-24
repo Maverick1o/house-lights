@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  C, cell, BUILTIN, positions, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequest,
+  C, cell, BUILTIN, positions, layoutCells, inSeason, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequest,
 } from '../public/shared/patterns.js';
 
 const strip = (id, label, count) => ({ id, label, zones: { count }, product: { capabilities: { has_multizone: true } } });
@@ -14,10 +14,40 @@ test('strips follow the saved order and direction, new strips go last', () => {
   assert.deepEqual(positions(lights, prefs).map(p => `${p.light.id}${p.zone}`), ['b1', 'b0', 'a0', 'a1', 'a2', 'c0']);
 });
 
-test('built-in patterns honour lights per colour and gaps', () => {
+test('spacing: lights per color and what goes between colors, set on the pattern', () => {
   const xmas = BUILTIN.find(b => b.id === 'b-xmas');
-  assert.deepEqual(patternCells(xmas, { width: 1, gaps: 'none' }, 4).map(x => x.c), [C.Red, C.Green, C.Red, C.Green]);
-  assert.deepEqual(patternCells(xmas, { width: 2, gaps: 'off' }, 8).map(x => x.b), [1, 1, 0, 0, 1, 1, 0, 0]);
+  assert.deepEqual(patternCells(xmas, {}, 4).map(x => x.c), [C.Red, C.Green, C.Red, C.Green]);
+  const spaced = { id: 'p-1', loop: [cell(C.Red), cell(C.Green)], width: 2, gaps: 'off' };
+  assert.deepEqual(patternCells(spaced, {}, 8).map(x => x.b), [1, 1, 0, 0, 1, 1, 0, 0]);
+  assert.deepEqual(patternCells(spaced, {}, 8).map(x => x.c), [C.Red, C.Red, C.Red, C.Red, C.Green, C.Green, C.Green, C.Green]);
+  assert.deepEqual(layoutCells({ loop: [cell(C.Red)], gaps: 'dim' }, 4).map(x => x.b), [1, 0.02, 1, 0.02]);
+  assert.deepEqual(layoutCells({ loop: [cell(C.Red)], width: 99, gaps: 'nonsense' }, 2).map(x => x.b), [1, 1], 'bad values fall back safely');
+});
+
+test('single-light changes sit on top of the spacing', () => {
+  const p = { id: 'p-2', loop: [cell(C.Red)], width: 1, gaps: 'none', overrides: { 1: cell(C.Blue) } };
+  assert.deepEqual(patternCells(p, {}, 3).map(x => x.c), [C.Red, C.Blue, C.Red]);
+});
+
+test('moods blend smoothly through their colors, repeating along long strings', () => {
+  const tranquil = BUILTIN.find(b => b.id === 'b-m-tranquil');
+  const cells = patternCells(tranquil, {}, 120);
+  assert.equal(cells.length, 120);
+  assert.ok(new Set(cells.map(x => x.c)).size > 20, 'a gradient, not blocks');
+  assert.equal(cells[0].c, cells[40].c, 'repeats about every 40 lights');
+  for (const x of cells) assert.ok(x.b > 0 && x.b <= 1);
+  assert.equal(BUILTIN.filter(b => b.layout === 'blend').length, 15, 'all 15 LIFX moods');
+});
+
+test('holidays know when they are in season, across New Year too', () => {
+  const byId = id => BUILTIN.find(b => b.id === id);
+  assert.ok(inSeason(byId('b-xmas'), new Date(2026, 11, 10)));
+  assert.ok(!inSeason(byId('b-xmas'), new Date(2026, 6, 4)));
+  assert.ok(inSeason(byId('b-july'), new Date(2026, 6, 4)));
+  assert.ok(inSeason(byId('b-newyear'), new Date(2027, 0, 1)));
+  assert.ok(!inSeason(byId('b-warm'), new Date()), 'basics have no season');
+  assert.equal(new Set(BUILTIN.map(b => b.id)).size, BUILTIN.length, 'ids are unique');
+  for (const id of ['b-warm', 'b-xmas', 'b-hallo', 'b-july', 'b-winter', 'b-valen', 'b-patty', 'b-rainbow']) assert.ok(byId(id), `${id} still exists for schedules`);
 });
 
 test('painted cells are reused exactly, or repeated when the light count changed', () => {
