@@ -22,16 +22,18 @@
 
   <!-- Setup screen: shown until a token is saved -->
   <section id="setup" class="screen" hidden>
-    <h1>House Lights</h1>
-    <p class="muted">Control the LIFX lights on <strong>your</strong> house. Your access token stays on this phone only.</p>
+    <h1 id="setup-title">House Lights</h1>
+    <p class="muted">Each house connects with its own LIFX token, which stays on this phone only. Houses never affect each other.</p>
     <ol class="steps">
-      <li>On this phone, open <a href="https://cloud.lifx.com/settings" target="_blank" rel="noopener">cloud.lifx.com/settings</a> and sign in with your LIFX account.</li>
+      <li>Open <a href="https://cloud.lifx.com/settings" target="_blank" rel="noopener">cloud.lifx.com/settings</a> and sign in with <strong>that house’s</strong> LIFX account.</li>
       <li>Tap <em>Generate New Token</em>, name it “House Lights”, and copy it.</li>
-      <li>Paste it below.</li>
+      <li>Name the house and paste the token below.</li>
     </ol>
     <form id="token-form">
-      <input id="token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste your LIFX token" required>
+      <input id="house-name-input" type="text" maxlength="40" autocomplete="off" placeholder="House name (e.g. Mom &amp; Dad’s)">
+      <input id="token-input" type="password" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="Paste the LIFX token" required>
       <button type="submit" class="primary">Connect</button>
+      <button type="button" id="setup-cancel" hidden>Cancel</button>
     </form>
     <p id="setup-error" class="error" hidden></p>
     <button id="demo-btn" class="link">Try demo mode (no lights needed)</button>
@@ -41,7 +43,7 @@
   <section id="main" class="screen" hidden>
     <header class="topbar">
       <div>
-        <h1 id="house-name">My House</h1>
+        <button id="house-switch" class="house-switch" aria-label="Switch house"><h1 id="house-name">My House</h1><span class="caret">▾</span></button>
         <p id="status" class="muted small"></p>
       </div>
       <button id="settings-btn" class="icon" aria-label="Settings">⚙︎</button>
@@ -113,14 +115,29 @@
     </div>
   </section>
 
-  <!-- Settings sheet -->
+  <!-- Houses and settings -->
   <dialog id="settings">
-    <h2>Settings</h2>
-    <p class="muted small" id="settings-info"></p>
-    <button id="refresh-btn">Refresh lights</button>
-    <button id="logout-btn" class="danger">Remove token from this phone</button>
-    <p class="muted small">To fully revoke access, delete the token at cloud.lifx.com/settings.</p>
+    <h2>Houses</h2>
+    <div id="house-list" class="house-list"></div>
+    <button id="add-house-btn">+ Add a house</button>
+    <div id="this-house">
+      <h3>This house</h3>
+      <p class="muted small" id="settings-info"></p>
+      <button id="rename-btn">Rename</button>
+      <button id="refresh-btn">Refresh lights</button>
+      <button id="logout-btn" class="danger">Remove from this phone</button>
+      <p class="muted small">To fully revoke access, delete the token at cloud.lifx.com/settings.</p>
+    </div>
+    <button id="leave-demo" hidden>Leave demo mode</button>
     <button id="close-settings" class="primary">Done</button>
+  </dialog>
+
+  <!-- Which LIFX location is this house? (only if one account has several) -->
+  <dialog id="loc-dialog">
+    <h2>Which one is this house?</h2>
+    <p class="muted small">This LIFX account has lights in more than one location. Pick the one for this house.</p>
+    <div id="loc-list" class="house-list"></div>
+    <button id="loc-cancel">Cancel</button>
   </dialog>
 
 

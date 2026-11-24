@@ -1,7 +1,8 @@
 /* House Lights — a tiny LIFX controller for one household.
  *
- * Each phone stores ONE LIFX token (its owner's). A token can only see the
- * lights on its own LIFX account, so one house can never affect another.
+ * A phone can hold several houses, each with its own LIFX token. Only the
+ * current house's token is ever used, and a token can only see the lights on
+ * its own LIFX account, so one house can never affect another.
  * Nothing is sent anywhere except api.lifx.com.
  *
  * Lights are shown by LIFX group. A group of strips behaves like one
@@ -10,7 +11,9 @@
 'use strict';
 
 const API = 'https://api.lifx.com/v1';
-const TOKEN_KEY = 'houselights.token';
+const TOKEN_KEY = 'houselights.token';      // old single-house storage (migrated)
+const HOUSES_KEY = 'houselights.houses';     // [{ id, name, token, locationId? }]
+const ACTIVE_KEY = 'houselights.active';
 const GROUPS_KEY = 'houselights.groups';     // per-group order, options, last pattern
 const PATTERNS_KEY = 'houselights.patterns'; // saved custom patterns
 const MAX_STATES = 50;                       // LIFX limit per /lights/states request
@@ -57,8 +60,20 @@ const IDENT = [
 
 // ---------- State ----------
 
-let token = localStorage.getItem(TOKEN_KEY);
+let houses = loadJSON(HOUSES_KEY, []);
+if (!houses.length && localStorage.getItem(TOKEN_KEY)) {
+  houses = [{ id: newId(), name: 'My house', token: localStorage.getItem(TOKEN_KEY) }];
+  saveHouses();
+}
+localStorage.removeItem(TOKEN_KEY);
+let house = houses.find(h => h.id === localStorage.getItem(ACTIVE_KEY)) || houses[0] || null;
 let demo = false;
+let fixingHouseId = null; // set when re-entering a token for an existing house
+
+function newId() { return Math.random().toString(36).slice(2, 10); }
+function saveHouses() { localStorage.setItem(HOUSES_KEY, JSON.stringify(houses)); }
+// Everything this app sends is limited to the current house.
+function houseSel() { return !demo && house?.locationId ? `location_id:${house.locationId}` : 'all'; }
 let lights = [];
 let groupPrefs = loadJSON(GROUPS_KEY, {});
 let saved = loadJSON(PATTERNS_KEY, []);
@@ -81,7 +96,7 @@ async function api(method, path, body) {
     res = await fetch(API + path, {
       method,
       headers: {
-        Authorization: 'Bearer ' + token,
+        Authorization: 'Bearer ' + house.token,
         ...(body ? { 'Content-Type': 'application/json' } : {}),
       },
       body: body ? JSON.stringify(body) : undefined,
@@ -420,7 +435,7 @@ function fold(key, summary, ...body) {
 
 function renderMain() {
   const names = [...new Set(lights.map(l => l.location?.name).filter(Boolean))];
-  $('#house-name').textContent = names.length === 1 ? names[0] : names.length ? names.join(' + ') : 'My House';
+  $('#house-name').textContent = demo ? 'Demo House' : house?.name || names[0] || 'My House';
   $('#status').textContent = (demo ? 'Demo mode · ' : '') +
     `${lights.length} light${lights.length === 1 ? '' : 's'} · updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#empty').hidden = lights.length > 0;
@@ -739,7 +754,7 @@ function show(screen) {
 }
 
 async function loadLights() {
-  lights = await api('GET', '/lights/all');
+  lights = await api('GET', `/lights/${enc(houseSel())}`);
   if (!maker) renderMain();
 }
 
@@ -758,12 +773,10 @@ async function refresh(label = 'Refreshing lights') {
 }
 
 function handleError(e, label) {
-  if (e.unauthorized) {
-    localStorage.removeItem(TOKEN_KEY);
-    token = null;
+  if (e.unauthorized && house) {
     $('#activity').hidden = true;
-    show('setup');
-    showSetupError('Your saved token no longer works. Please paste a new one.');
+    openSetup(house);
+    showSetupError(`The saved token for “${house.name}” no longer works. Please paste a new one.`);
     return;
   }
   showActivity(`${label ? `${label} — ` : ''}${e.message}`, 'err');
@@ -783,50 +796,138 @@ async function start() {
 
 // ---------- Events ----------
 
+// ---------- Houses ----------
+
+function openSetup(fixHouse = null) {
+  fixingHouseId = fixHouse?.id || null;
+  const adding = houses.length > 0 && !fixHouse;
+  $('#setup-title').textContent = fixHouse ? `Reconnect ${fixHouse.name}` : adding ? 'Add a house' : 'House Lights';
+  $('#house-name-input').value = fixHouse?.name || '';
+  $('#token-input').value = '';
+  $('#setup-cancel').hidden = !houses.length;
+  showSetupError('');
+  show('setup');
+}
+
+// Ask which LIFX location is this house, when one account has several.
+function chooseLocation(locs) {
+  return new Promise(resolve => {
+    const dlg = $('#loc-dialog');
+    $('#loc-list').replaceChildren(...locs.map(l =>
+      el('button', { onclick: () => { dlg.close(); resolve(l); } }, `${l.name} (${l.count} light${l.count === 1 ? '' : 's'})`)));
+    $('#loc-cancel').onclick = () => { dlg.close(); resolve(null); };
+    dlg.showModal();
+  });
+}
+
+function setActive(h) {
+  house = h;
+  demo = false;
+  localStorage.setItem(ACTIVE_KEY, h.id);
+  lights = [];
+  maker = null;
+  identifySnapshot = null;
+  openKeys.clear();
+  start();
+}
+
 $('#token-form').addEventListener('submit', async e => {
   e.preventDefault();
   const value = $('#token-input').value.trim();
   if (!value) return;
-  const btn = e.target.querySelector('button');
+  const btn = e.target.querySelector('button[type=submit]');
   btn.disabled = true;
   showSetupError('');
-  token = value;
+  const existing = houses.find(h => h.id === fixingHouseId);
+  const candidate = {
+    id: existing?.id || newId(),
+    name: $('#house-name-input').value.trim().slice(0, 40) || existing?.name || (houses.length ? 'New house' : 'My house'),
+    token: value,
+    ...(existing?.locationId ? { locationId: existing.locationId } : {}),
+  };
+  const prev = { house, demo };
+  house = candidate;
   demo = false;
   try {
-    await loadLights(); // validates the token
-    localStorage.setItem(TOKEN_KEY, token);
+    const found = await api('GET', '/lights/all'); // validates the token
+    const locs = [...new Map(found.map(l => [l.location?.id, { id: l.location?.id, name: l.location?.name || 'Lights', count: found.filter(x => x.location?.id === l.location?.id).length }])).values()];
+    if (locs.length > 1 && !candidate.locationId) {
+      const pick = await chooseLocation(locs);
+      if (!pick) throw new Error('Choose which location is this house.');
+      candidate.locationId = pick.id;
+      // Another house on this phone with the same account and no location
+      // would see these lights too, so pin it to the other location.
+      for (const h of houses.filter(h => h.token === value && !h.locationId && h.id !== candidate.id)) {
+        const others = locs.filter(l => l.id !== pick.id);
+        if (others.length === 1) h.locationId = others[0].id;
+      }
+    }
+    if (houses.some(h => h.id !== candidate.id && h.token === value && (h.locationId || null) === (candidate.locationId || null))) {
+      throw new Error('That house is already on this phone.');
+    }
+    const i = houses.findIndex(h => h.id === candidate.id);
+    if (i >= 0) houses[i] = candidate; else houses.push(candidate);
+    saveHouses();
     $('#token-input').value = '';
-    show('main');
+    setActive(candidate);
   } catch (err) {
-    token = null;
+    ({ house, demo } = prev);
     showSetupError(err.unauthorized ? 'That token didn’t work. Check you copied all of it.' : err.message);
   } finally {
     btn.disabled = false;
   }
 });
 
+$('#setup-cancel').addEventListener('click', () => { fixingHouseId = null; show('main'); });
+
 $('#demo-btn').addEventListener('click', () => { demo = true; start(); });
 
 document.querySelectorAll('[data-all]').forEach(b =>
-  b.addEventListener('click', () => run(`Everything ${b.dataset.all}`, () => setState('all', { power: b.dataset.all }))));
+  b.addEventListener('click', () => run(`Everything ${b.dataset.all}`, () => setState(houseSel(), { power: b.dataset.all }))));
 
-$('#settings-btn').addEventListener('click', () => {
+function openHouses() {
+  $('#house-list').replaceChildren(...houses.map(h =>
+    el('button', {
+      class: 'house-item' + (!demo && h.id === house?.id ? ' current' : ''),
+      onclick: () => {
+        if (activity.busy) { showActivity(`Still working on “${activity.busy}” — switch houses when it’s done`); return; }
+        $('#settings').close();
+        if (demo || h.id !== house?.id) setActive(h);
+      },
+    }, el('span', { text: h.name }), !demo && h.id === house?.id ? el('span', { class: 'muted small', text: '✓ showing' }) : null)));
   $('#settings-info').textContent = demo
     ? 'You are in demo mode. No real lights are being changed.'
-    : `Connected to LIFX. Token ends in …${(token || '').slice(-4)}.`;
-  $('#logout-btn').textContent = demo ? 'Leave demo mode' : 'Remove token from this phone';
+    : `“${house?.name}” · token ends in …${(house?.token || '').slice(-4)}`;
+  $('#this-house').hidden = demo || !house;
+  $('#leave-demo').hidden = !demo;
   $('#settings').showModal();
-});
+}
+$('#settings-btn').addEventListener('click', openHouses);
+$('#house-switch').addEventListener('click', openHouses);
 $('#close-settings').addEventListener('click', () => $('#settings').close());
+$('#add-house-btn').addEventListener('click', () => { $('#settings').close(); openSetup(); });
 $('#refresh-btn').addEventListener('click', () => { $('#settings').close(); refresh(); });
-$('#logout-btn').addEventListener('click', () => {
-  if (!demo && !confirm('Remove your LIFX token from this phone?')) return;
-  localStorage.removeItem(TOKEN_KEY);
-  token = null;
+$('#rename-btn').addEventListener('click', () => {
+  const name = prompt('House name', house.name)?.trim();
+  if (!name) return;
+  house.name = name.slice(0, 40);
+  saveHouses();
+  $('#settings').close();
+  renderMain();
+});
+$('#leave-demo').addEventListener('click', () => {
+  $('#settings').close();
   demo = false;
   lights = [];
+  if (house) setActive(house); else openSetup();
+});
+$('#logout-btn').addEventListener('click', () => {
+  if (!confirm(`Remove “${house.name}” from this phone? Its lights won’t be changed.`)) return;
+  houses = houses.filter(h => h.id !== house.id);
+  saveHouses();
   $('#settings').close();
-  show('setup');
+  if (houses.length) setActive(houses[0]);
+  else { house = null; lights = []; localStorage.removeItem(ACTIVE_KEY); openSetup(); }
 });
 
 // Pattern maker controls
@@ -885,7 +986,7 @@ $('#maker-delete').addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && (token || demo) && !$('#main').hidden) refresh('Checking for changes');
+  if (!document.hidden && (house || demo) && !$('#main').hidden) refresh('Checking for changes');
 });
 
 // ---------- Demo mode (fake lights, no network) ----------
@@ -948,4 +1049,4 @@ async function mockApi(method, path, body) {
 // ---------- Boot ----------
 
 importFromHash();
-if (token) start(); else show('setup');
+if (house) start(); else openSetup();
