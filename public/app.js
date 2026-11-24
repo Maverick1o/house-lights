@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2026.11.24-3';
+const APP_VERSION = '2026.11.24-4';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
@@ -754,13 +754,13 @@ function openMaker(gid, pattern) {
     motion: normalizeMotion(pattern?.effect, pattern?.motion),
     name: isSaved ? pattern.name : '',
     editingId: isSaved ? pattern.id : null,
-    brush: cell(C.Red),
-    level: 1,
+    sel: null, // { kind: 'seq' | 'house', idx: Set } — lights the sheet is editing
     history: [],
     sent: null,
   };
   maker.savedState = isSaved ? editState() : null;
   maker.startState = editState();
+  closeSheet();
   show('maker');
   renderMaker();
   window.scrollTo(0, 0);
@@ -776,12 +776,20 @@ function remember() {
 function undo() {
   const last = maker?.history.pop();
   if (!last) return;
+  const sel = maker.sel;
   Object.assign(maker, JSON.parse(last));
   renderMaker();
+  // Keep the sheet on the same lights if they still exist.
+  if (sel && [...sel.idx].every(i => i < (sel.kind === 'seq' ? maker.seq.length : maker.n))) {
+    maker.sel = sel;
+    markSelection();
+    renderSheet();
+  } else closeSheet();
 }
 
 function closeMaker(force = false) {
   if (!force && isDirty() && !confirm('Leave without saving? Your changes to this pattern will be lost.')) return;
+  closeSheet();
   maker = null;
   show('main');
   renderMain();
@@ -805,7 +813,7 @@ function renderMaker() {
   $('#maker-share').hidden = !m.editingId;
   $('#maker-delete').hidden = !m.editingId;
   renderHeader();
-  renderDock();
+  renderShowButton();
 }
 
 function renderHeader() {
@@ -857,7 +865,7 @@ function setMotion(change) {
   maker.motion = next;
   renderMotion();
   renderHeader();
-  renderDock();
+  renderShowButton();
 }
 
 function renderSeq() {
@@ -894,26 +902,8 @@ function renderHouse() {
   $('#overrides-count').textContent = `${changed} light${changed === 1 ? '' : 's'} changed by hand (dotted)`;
 }
 
-function renderDock() {
-  const m = maker;
-  $('#brush-colors').replaceChildren(
-    ...COLORS.map(c => sw(c.css, c.name, () => setBrush(c.api), { class: 'swatch-btn' + (m.brush.c === c.api && m.brush.b > 0 ? ' active' : '') })),
-    el('input', {
-      type: 'color', class: 'custom-swatch' + (m.brush.c.startsWith('#') && m.brush.b > 0 ? ' active' : ''),
-      title: 'Any colour', 'aria-label': 'Pick any colour',
-      value: m.brush.c.startsWith('#') ? m.brush.c : '#ff8800', onchange: e => setBrush(e.target.value),
-    }),
-    el('button', {
-      class: 'swatch-btn off-swatch' + (m.brush.b === 0 ? ' active' : ''), title: 'Off', 'aria-label': 'Off (light turned off)',
-      onclick: () => { m.brush = { ...m.brush, b: 0 }; renderDock(); },
-    }, 'Off'));
-  $('#brush-levels').replaceChildren(...BRIGHTNESS.map(([v, t]) => el('button', {
-    class: m.brush.b === v ? 'active' : '',
-    disabled: m.brush.b === 0,
-    'aria-label': `Brightness ${t}`,
-    onclick: () => { m.level = v; m.brush = { ...m.brush, b: v }; renderDock(); },
-  }, t)));
-  const upToDate = m.sent === sendKey();
+function renderShowButton() {
+  const upToDate = maker.sent === sendKey();
   const btn = $('#maker-preview');
   btn.textContent = upToDate ? '✓ On house' : '💡 Show on house';
   btn.classList.toggle('primary', !upToDate);
@@ -926,25 +916,24 @@ function cellEl(kind, i, x, label) {
   return node;
 }
 
-function setBrush(c) {
-  maker.brush = { c, b: maker.level || 1 };
-  renderDock();
-}
-
 function afterEdit() {
   renderHouse();
   renderHeader();
-  renderDock();
+  renderShowButton();
+  if (maker.sel) { renderSheet(); markSelection(); }
 }
 
 function addSeqLight() {
   remember();
-  maker.seq.push({ ...maker.brush });
+  const last = maker.seq[maker.seq.length - 1];
+  maker.seq.push({ ...last });
   renderSeq();
   afterEdit();
+  select('seq', [maker.seq.length - 1]);
 }
 
 function startFrom(q) {
+  closeSheet();
   remember();
   maker.seq = clone(q.seq || q.pattern.loop);
   maker.overrides = q.pattern ? overridesFor(q.pattern, maker.seq, maker.n) : {};
@@ -953,43 +942,181 @@ function startFrom(q) {
   showActivity(`Started from ${q.name} — tap ↶ to undo`, 'ok');
 }
 
-// Painting the repeating pattern: tap, or drag sideways across it.
-let painting = false;
-let gestureRemembered = false;
-function paintSeqAt(target) {
-  const node = target?.closest?.('#seq-grid .cell[data-kind="seq"]');
-  if (!node || !maker) return;
-  const i = +node.dataset.i;
-  if (keyOf(maker.seq[i]) === keyOf(maker.brush)) return;
-  if (!gestureRemembered) { remember(); gestureRemembered = true; }
-  maker.seq[i] = { ...maker.brush };
-  paintCellEl(node, maker.seq[i]);
+// ---------- The light sheet ----------
+// Tap a light (or drag across lights in the repeating pattern) to select it.
+// The sheet slides up and edits exactly those lights.
+
+function selectedCells() {
+  const s = maker?.sel;
+  if (!s) return [];
+  const cells = s.kind === 'seq' ? maker.seq : makerCells();
+  return [...s.idx].map(i => cells[i]).filter(Boolean);
+}
+
+function markSelection() {
+  document.querySelectorAll('#maker .cell.selected').forEach(n => n.classList.remove('selected'));
+  const s = maker?.sel;
+  if (!s) return;
+  const grid = s.kind === 'seq' ? '#seq-grid' : '#house-grid';
+  for (const i of s.idx) document.querySelector(`${grid} .cell[data-i="${i}"]`)?.classList.add('selected');
+}
+
+function select(kind, indices) {
+  maker.sel = { kind, idx: new Set(indices) };
+  markSelection();
+  openSheet();
+}
+
+function openSheet() {
+  const sheet = $('#light-sheet');
+  renderSheet();
+  sheet.style.transform = '';
+  sheet.classList.add('open');
+  sheet.setAttribute('aria-hidden', 'false');
+  document.body.classList.add('sheet-open');
+  // Keep the selected light visible above the sheet.
+  requestAnimationFrame(() => {
+    const first = document.querySelector('#maker .cell.selected');
+    if (!first) return;
+    const r = first.getBoundingClientRect();
+    const sheetTop = window.innerHeight - sheet.offsetHeight;
+    if (r.bottom > sheetTop - 12) window.scrollBy({ top: r.bottom - sheetTop + 24, behavior: 'smooth' });
+  });
+}
+
+function closeSheet() {
+  const sheet = $('#light-sheet');
+  if (maker) maker.sel = null;
+  markSelection();
+  sheet.classList.remove('open');
+  sheet.style.transform = '';
+  sheet.setAttribute('aria-hidden', 'true');
+  document.body.classList.remove('sheet-open');
+}
+
+function houseLightName(i) {
+  const g = groupById(maker.gid);
+  let start = 0;
+  for (const l of g.lights) {
+    const len = positions([l], g.id).length;
+    if (i < start + len) return `${l.label} · light ${i - start + 1}`;
+    start += len;
+  }
+  return `Light ${i + 1}`;
+}
+
+function renderSheet() {
+  const m = maker;
+  const cells = selectedCells();
+  if (!cells.length) return;
+  const one = cells.length === 1 ? [...m.sel.idx][0] : null;
+  $('#sheet-title').textContent = one == null ? `${cells.length} lights selected`
+    : m.sel.kind === 'seq' ? `Pattern light ${one + 1}` : houseLightName(one);
+  $('#sheet-sub').textContent = m.sel.kind === 'seq'
+    ? 'Repeats all the way around your house'
+    : 'Changes just this light on your house';
+  const same = f => cells.every(x => f(x) === f(cells[0]));
+  const allOff = cells.every(x => !(x.b > 0));
+  const colour = !allOff && same(x => x.c) ? cells[0].c : null;
+  const level = same(x => x.b) ? cells[0].b : null;
+
+  $('#sheet-colors').replaceChildren(
+    ...COLORS.map(c => sw(c.css, c.name, () => applyToSelection({ c: c.api }), { class: 'swatch-btn' + (colour === c.api ? ' active' : '') })),
+    el('input', {
+      type: 'color', class: 'custom-swatch' + (colour?.startsWith('#') ? ' active' : ''),
+      title: 'Any colour', 'aria-label': 'Pick any colour',
+      value: colour?.startsWith('#') ? colour : '#ff8800',
+      onchange: e => applyToSelection({ c: e.target.value }),
+    }),
+    el('button', {
+      class: 'swatch-btn off-swatch' + (allOff ? ' active' : ''), title: 'Off', 'aria-label': 'Turn off',
+      onclick: () => applyToSelection({ b: 0 }),
+    }, 'Off'));
+  $('#sheet-levels').replaceChildren(...BRIGHTNESS.map(([v, t]) => el('button', {
+    class: level === v ? 'active' : '',
+    'aria-label': `Brightness ${t}`,
+    onclick: () => applyToSelection({ b: v }),
+  }, t)));
+}
+
+// Picking a colour keeps each light's brightness (or turns an off light on);
+// picking a brightness keeps each light's colour.
+const withChange = (x, ch) => (ch.c !== undefined ? { c: ch.c, b: x.b > 0 ? x.b : 1 } : { c: x.c, b: ch.b });
+
+function applyToSelection(change) {
+  const m = maker;
+  const s = m.sel;
+  if (!s) return;
+  const base = tile(m.seq, m.n);
+  const updates = [...s.idx].map(i => {
+    const current = s.kind === 'seq' ? m.seq[i] : m.overrides[i] || base[i];
+    return [i, withChange(current, change), current];
+  }).filter(([, next, current]) => keyOf(next) !== keyOf(current));
+  if (!updates.length) return;
+  remember();
+  for (const [i, next] of updates) {
+    if (s.kind === 'seq') m.seq[i] = next;
+    else if (keyOf(next) === keyOf(base[i])) delete m.overrides[i]; // back to the pattern
+    else m.overrides[i] = next;
+  }
+  if (s.kind === 'seq') renderSeq();
   afterEdit();
 }
+
+// Repeating pattern: tap a light, or drag sideways to select several.
+let gesture = null; // { start, prev }
 document.addEventListener('pointerdown', e => {
-  if (!e.target.closest?.('#seq-grid .cell[data-kind="seq"]')) return;
-  painting = true;
-  gestureRemembered = false;
-  paintSeqAt(e.target);
+  const node = e.target.closest?.('#seq-grid .cell[data-kind="seq"]');
+  if (!node || !maker) return;
+  gesture = { start: +node.dataset.i, prev: maker.sel };
+  maker.sel = { kind: 'seq', idx: new Set([gesture.start]) };
+  markSelection();
 });
 document.addEventListener('pointermove', e => {
-  if (painting) paintSeqAt(document.elementFromPoint(e.clientX, e.clientY));
+  if (!gesture) return;
+  const node = document.elementFromPoint(e.clientX, e.clientY)?.closest?.('#seq-grid .cell[data-kind="seq"]');
+  if (!node) return;
+  const i = +node.dataset.i;
+  const [a, b] = [Math.min(gesture.start, i), Math.max(gesture.start, i)];
+  maker.sel = { kind: 'seq', idx: new Set(Array.from({ length: b - a + 1 }, (_, k) => a + k)) };
+  markSelection();
 });
-['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => (painting = false)));
+document.addEventListener('pointerup', () => {
+  if (!gesture) return;
+  gesture = null;
+  openSheet();
+});
+document.addEventListener('pointercancel', () => {
+  if (!gesture) return; // the page started scrolling instead: leave things as they were
+  maker.sel = gesture.prev;
+  gesture = null;
+  markSelection();
+});
 
-// The house view: tap one light to change just that light (tap again to undo it).
-function tapHouseLight(i) {
-  const m = maker;
-  const base = tile(m.seq, m.n)[i];
-  const current = m.overrides[i] || base;
-  let next;
-  if (keyOf(current) === keyOf(m.brush)) next = m.overrides[i] ? null : undefined; // same colour: clear a hand change
-  else next = keyOf(base) === keyOf(m.brush) ? null : { ...m.brush };
-  if (next === undefined) return;
-  remember();
-  if (next) m.overrides[i] = next; else delete m.overrides[i];
-  afterEdit();
-}
+// Swipe the sheet down (or tap ✕, an empty area, or Escape) to close it.
+(() => {
+  const sheet = $('#light-sheet');
+  let drag = null;
+  sheet.addEventListener('pointerdown', e => {
+    if (!e.target.closest('.sheet-grab, .sheet-head') || e.target.closest('button')) return;
+    drag = { y: e.clientY, dy: 0 };
+    sheet.setPointerCapture(e.pointerId);
+    sheet.classList.add('dragging');
+  });
+  sheet.addEventListener('pointermove', e => {
+    if (!drag) return;
+    drag.dy = Math.max(0, e.clientY - drag.y);
+    sheet.style.transform = `translateY(${drag.dy}px)`;
+  });
+  const end = () => {
+    if (!drag) return;
+    sheet.classList.remove('dragging');
+    if (drag.dy > 60) closeSheet(); else sheet.style.transform = '';
+    drag = null;
+  };
+  sheet.addEventListener('pointerup', end);
+  sheet.addEventListener('pointercancel', end);
+})();
 
 function makerPattern() {
   return {
@@ -1404,12 +1531,24 @@ $('#seq-remove').addEventListener('click', () => {
   if (maker.seq.length <= 1) return;
   remember();
   maker.seq.pop();
+  if (maker.sel?.kind === 'seq') {
+    maker.sel.idx.delete(maker.seq.length);
+    if (!maker.sel.idx.size) closeSheet();
+  }
   renderSeq();
   afterEdit();
 });
 $('#house-grid').addEventListener('click', e => {
   const node = e.target.closest('.cell[data-kind="house"]');
-  if (node) tapHouseLight(+node.dataset.i);
+  if (node) select('house', [+node.dataset.i]);
+});
+$('#sheet-close').addEventListener('click', closeSheet);
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && maker?.sel) closeSheet(); });
+// Tapping an empty part of the page closes the sheet.
+$('#maker').addEventListener('click', e => {
+  if (!maker?.sel || gesture) return;
+  if (e.target.closest('#light-sheet, .cell, .add-cell, button, input, select, a, label')) return;
+  closeSheet();
 });
 $('#overrides-reset').addEventListener('click', () => {
   remember();
@@ -1427,7 +1566,7 @@ $('#maker-preview').addEventListener('click', () => {
   run(`Show on house · ${g.name}`, async () => {
     await paintGroup(g, cells, m.motion);
     m.sent = key;
-  }).then(() => { if (maker === m) renderDock(); });
+  }).then(() => { if (maker === m) renderShowButton(); });
 });
 $('#maker-save').addEventListener('click', () => {
   if (!maker.name) {

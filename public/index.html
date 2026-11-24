@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-3">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-4">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -97,7 +97,7 @@
 
     <div class="card">
       <h3 class="first">Repeating pattern</h3>
-      <p class="muted small">Pick a colour at the bottom, then tap these lights (or drag across them). This repeats all the way around your house.</p>
+      <p class="muted small">Tap a light to choose its colour, or drag across several to change them together. This repeats all the way around your house.</p>
       <div id="seq-grid" class="grid seq"></div>
       <div class="seq-foot">
         <span id="seq-count" class="muted small"></span>
@@ -149,12 +149,25 @@
       <button id="maker-delete" class="small danger" hidden>Delete pattern</button>
     </div>
 
-    <!-- Paint bar: always in reach while painting -->
-    <div class="maker-dock">
-      <div id="brush-colors" class="dock-swatches"></div>
-      <div class="dock-row">
-        <div id="brush-levels" class="levels"></div>
-        <button id="maker-preview" class="primary">💡 Show on house</button>
+    <!-- Bottom bar (hidden behind the sheet while it is open) -->
+    <div class="maker-bottom">
+      <button id="maker-preview" class="primary wide">💡 Show on house</button>
+    </div>
+
+    <!-- Light sheet: slides up when a light is tapped -->
+    <div id="light-sheet" class="sheet" role="dialog" aria-modal="false" aria-labelledby="sheet-title" aria-hidden="true">
+      <div class="sheet-grab" aria-hidden="true"><span></span></div>
+      <div class="sheet-head">
+        <div class="grow">
+          <strong id="sheet-title">Light</strong>
+          <div id="sheet-sub" class="muted small"></div>
+        </div>
+        <button id="sheet-close" class="icon-btn" aria-label="Close">✕</button>
+      </div>
+      <div id="sheet-colors" class="dock-swatches"></div>
+      <div class="sheet-row">
+        <span class="muted small">Brightness</span>
+        <div id="sheet-levels" class="levels"></div>
       </div>
     </div>
   </section>
@@ -190,6 +203,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-3"></script>
+  <script src="app.js?v=2026.11.24-4"></script>
 </body>
 </html>
