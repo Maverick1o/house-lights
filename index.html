@@ -5,13 +5,14 @@
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
   <title>House Lights</title>
   <meta name="theme-color" content="#111318">
+  <meta http-equiv="Cache-Control" content="no-cache">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2026.11.23-1">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -36,6 +37,7 @@
       <button type="button" id="setup-cancel" hidden>Cancel</button>
     </form>
     <p id="setup-error" class="error" hidden></p>
+    <p id="storage-warning" class="error" hidden>This browser isn’t letting the app save anything, so it can’t remember your houses. On iPhone, check you’re not in Private Browsing, and that Settings › Apps › Safari › Block All Cookies is off.</p>
     <button id="demo-btn" class="link">Try demo mode (no lights needed)</button>
   </section>
 
@@ -130,6 +132,7 @@
     </div>
     <button id="leave-demo" hidden>Leave demo mode</button>
     <button id="close-settings" class="primary">Done</button>
+    <p id="app-version" class="muted small center" style="margin-top:10px"></p>
   </dialog>
 
   <!-- Which LIFX location is this house? (only if one account has several) -->
@@ -141,6 +144,6 @@
   </dialog>
 
 
-  <script src="app.js"></script>
+  <script src="app.js?v=2026.11.23-1"></script>
 </body>
 </html>

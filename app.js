@@ -11,7 +11,8 @@
 'use strict';
 
 const API = 'https://api.lifx.com/v1';
-const TOKEN_KEY = 'houselights.token';      // old single-house storage (migrated)
+const APP_VERSION = '2026.11.23-1';
+const TOKEN_KEY = 'houselights.token';      // old single-house storage, kept in sync (see saveHouses)
 const HOUSES_KEY = 'houselights.houses';     // [{ id, name, token, locationId? }]
 const ACTIVE_KEY = 'houselights.active';
 const GROUPS_KEY = 'houselights.groups';     // per-group order, options, last pattern
@@ -65,13 +66,31 @@ if (!houses.length && localStorage.getItem(TOKEN_KEY)) {
   houses = [{ id: newId(), name: 'My house', token: localStorage.getItem(TOKEN_KEY) }];
   saveHouses();
 }
-localStorage.removeItem(TOKEN_KEY);
 let house = houses.find(h => h.id === localStorage.getItem(ACTIVE_KEY)) || houses[0] || null;
 let demo = false;
 let fixingHouseId = null; // set when re-entering a token for an existing house
 
 function newId() { return Math.random().toString(36).slice(2, 10); }
-function saveHouses() { localStorage.setItem(HOUSES_KEY, JSON.stringify(houses)); }
+function saveHouses() {
+  localStorage.setItem(HOUSES_KEY, JSON.stringify(houses));
+  // Older copies of the app (which iPhones sometimes keep cached) only read
+  // this key. Keeping it set means they still open to your house instead of
+  // the connect screen.
+  if (houses[0]) localStorage.setItem(TOKEN_KEY, houses[0].token);
+  else localStorage.removeItem(TOKEN_KEY);
+}
+if (houses.length) saveHouses();
+
+// Make sure saved houses can actually be stored on this phone.
+function storageWorks() {
+  try {
+    localStorage.setItem('houselights.check', '1');
+    localStorage.removeItem('houselights.check');
+    return true;
+  } catch { return false; }
+}
+// Ask the browser not to clear our saved data to free up space.
+navigator.storage?.persist?.().catch(() => {});
 // Everything this app sends is limited to the current house.
 function houseSel() { return !demo && house?.locationId ? `location_id:${house.locationId}` : 'all'; }
 let lights = [];
@@ -806,6 +825,7 @@ function openSetup(fixHouse = null) {
   $('#token-input').value = '';
   $('#setup-cancel').hidden = !houses.length;
   showSetupError('');
+  $('#storage-warning').hidden = storageWorks();
   show('setup');
 }
 
@@ -900,6 +920,7 @@ function openHouses() {
     : `“${house?.name}” · token ends in …${(house?.token || '').slice(-4)}`;
   $('#this-house').hidden = demo || !house;
   $('#leave-demo').hidden = !demo;
+  $('#app-version').textContent = `App version ${APP_VERSION}`;
   $('#settings').showModal();
 }
 $('#settings-btn').addEventListener('click', openHouses);
