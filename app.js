@@ -11,7 +11,7 @@
 'use strict';
 
 const API = 'https://api.lifx.com/v1';
-const APP_VERSION = '2026.11.23-1';
+const APP_VERSION = '2026.11.23-2';
 const TOKEN_KEY = 'houselights.token';      // old single-house storage, kept in sync (see saveHouses)
 const HOUSES_KEY = 'houselights.houses';     // [{ id, name, token, locationId? }]
 const ACTIVE_KEY = 'houselights.active';
@@ -89,6 +89,18 @@ function storageWorks() {
     return true;
   } catch { return false; }
 }
+// One line describing what this phone has saved, to help track down
+// "it keeps asking me to connect" problems. Never includes token values.
+function diagnostics() {
+  let saved = '?', legacy = '?';
+  try {
+    saved = (JSON.parse(localStorage.getItem(HOUSES_KEY)) || []).length;
+    legacy = localStorage.getItem(TOKEN_KEY) ? 'yes' : 'no';
+  } catch {}
+  const mode = navigator.standalone || matchMedia('(display-mode: standalone)').matches ? 'Home Screen app' : 'Safari tab';
+  return `v${APP_VERSION} · ${mode} · saved houses: ${saved} · old token: ${legacy} · storage: ${storageWorks() ? 'OK' : 'BLOCKED'} · keys: ${Object.keys(localStorage).filter(k => k.startsWith('houselights.')).length}`;
+}
+
 // Ask the browser not to clear our saved data to free up space.
 navigator.storage?.persist?.().catch(() => {});
 // Everything this app sends is limited to the current house.
@@ -826,6 +838,7 @@ function openSetup(fixHouse = null) {
   $('#setup-cancel').hidden = !houses.length;
   showSetupError('');
   $('#storage-warning').hidden = storageWorks();
+  $('#diagnostics').textContent = diagnostics();
   show('setup');
 }
 
