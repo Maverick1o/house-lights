@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2026.11.24-1';
+const APP_VERSION = '2026.11.24-2';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
@@ -592,7 +592,7 @@ function groupCard(g) {
       ...BUILTIN.map(pt => el('button', { onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, pt.name)),
       ...saved.map(pt => el('button', { class: 'saved', onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)) }, `⭐ ${pt.name}`)),
     ]),
-    el('button', { class: 'primary wide', style: 'margin-top:12px', onclick: () => openMaker(g.id) }, '✏️ Pattern maker'),
+    el('button', { class: 'primary wide', style: 'margin-top:12px', onclick: () => openMaker(g.id) }, '✏️ Make or edit a pattern'),
     el('div', { class: 'row', style: 'margin-top:10px' },
       el('button', { onclick: () => run(`Chase · ${g.name}`, () => chase(sel)) }, '▶︎ Chase'),
       el('button', { onclick: () => run(`Stop · ${g.name}`, () => effectsOff(sel)) }, '■ Stop')));
@@ -677,51 +677,153 @@ function orderEditor(g) {
 }
 
 // ---------- Pattern maker ----------
+// One source of truth: a short repeating pattern (seq) is tiled around the
+// house, plus optional single-light changes (overrides). The house view always
+// shows the result, so what you see is exactly what gets sent.
 
 const BRIGHTNESS = [[1, '100%'], [0.5, '50%'], [0.15, '15%'], [0.03, '3%']];
+const MAX_SEQ = 24;
+const QUICK_STARTS = [
+  ...BUILTIN.filter(b => !b.rainbow).map(b => ({ name: b.name, seq: b.loop })),
+  { name: '🍬 Candy cane', seq: [cell(C.Red), cell(C.Red), cell(C.White), cell(C.White)] },
+  { name: '🌈 Rainbow', seq: Array.from({ length: 12 }, (_, i) => cell(`hue:${i * 30} saturation:1`)) },
+];
 let maker = null;
+
+const keyOf = x => `${x.c}|${x.b}`;
+const clone = x => structuredClone(x);
+
+function makerCells(m = maker) {
+  const cells = tile(m.seq, m.n);
+  for (const [i, x] of Object.entries(m.overrides)) if (+i < m.n) cells[+i] = { ...x };
+  return cells;
+}
+const editState = (m = maker) => JSON.stringify({ seq: m.seq, overrides: m.overrides, effect: m.effect, name: m.name });
+const sendKey = (m = maker) => JSON.stringify({ cells: makerCells(m), effect: m.effect });
+
+// Single-light changes in a saved pattern = where it differs from the repeat.
+function overridesFor(pattern, seq, n) {
+  if (pattern.overrides) return Object.fromEntries(Object.entries(pattern.overrides).filter(([i]) => +i < n).map(([i, x]) => [i, { ...x }]));
+  if (pattern.cells?.length !== n) return {};
+  const base = tile(seq, n);
+  const out = {};
+  pattern.cells.forEach((x, i) => { if (keyOf(x) !== keyOf(base[i])) out[i] = { ...x }; });
+  return out;
+}
 
 function openMaker(gid, pattern) {
   const g = groupById(gid);
-  const pos = positions(g.lights, gid);
-  const loop = pattern?.loop?.map(x => ({ ...x })) || [cell(C.Red), cell(C.Green)];
+  const n = positions(g.lights, gid).length;
+  const isSaved = !!pattern && !pattern.id?.startsWith('b-');
+  const seq = pattern?.loop?.map(x => ({ ...x })) || [cell(C.Red), cell(C.Green)];
   maker = {
-    gid,
-    n: pos.length,
-    loop,
-    cells: pattern ? patternCells(pattern, gid, pos.length) : tile(loop, pos.length),
-    brush: cell(C.Red),
+    gid, n, seq,
+    overrides: isSaved ? overridesFor(pattern, seq, n) : {},
     effect: pattern?.effect || 'none',
-    name: pattern && !pattern.id.startsWith('b-') ? pattern.name : '',
-    editingId: pattern && !pattern.id.startsWith('b-') ? pattern.id : null,
+    name: isSaved ? pattern.name : '',
+    editingId: isSaved ? pattern.id : null,
+    brush: cell(C.Red),
+    level: 1,
+    history: [],
+    sent: null,
   };
-  if (pattern?.rainbow) maker.loop = maker.cells.slice(0, Math.min(12, maker.n));
+  maker.savedState = isSaved ? editState() : null;
+  maker.startState = editState();
   show('maker');
   renderMaker();
   window.scrollTo(0, 0);
 }
 
-function closeMaker() {
+const isDirty = () => !!maker && editState() !== (maker.savedState ?? maker.startState);
+
+function remember() {
+  maker.history.push(JSON.stringify({ seq: maker.seq, overrides: maker.overrides, effect: maker.effect }));
+  if (maker.history.length > 80) maker.history.shift();
+}
+
+function undo() {
+  const last = maker?.history.pop();
+  if (!last) return;
+  Object.assign(maker, JSON.parse(last));
+  renderMaker();
+}
+
+function closeMaker(force = false) {
+  if (!force && isDirty() && !confirm('Leave without saving? Your changes to this pattern will be lost.')) return;
   maker = null;
   show('main');
   renderMain();
 }
 
 function renderMaker() {
-  const g = groupById(maker.gid);
   const m = maker;
-  $('#maker-title').textContent = `${g.name} · ${m.n} lights`;
-  $('#maker-name').value = m.name;
+  $('#quick-starts').replaceChildren(...QUICK_STARTS.map(q => el('button', { class: 'small', onclick: () => startFrom(q) }, q.name)));
+  $('#saved-row').hidden = !saved.length;
+  $('#saved-patterns').replaceChildren(...saved.map(p => el('button', {
+    class: 'small saved' + (p.id === m.editingId ? ' active' : ''),
+    onclick: () => {
+      if (p.id === m.editingId) return;
+      if (isDirty() && !confirm('Switch patterns without saving your changes?')) return;
+      openMaker(m.gid, p);
+    },
+  }, `⭐ ${p.name}`)));
+  renderSeq();
+  renderHouse();
+  document.querySelectorAll('#effect-seg button').forEach(b => b.classList.toggle('active', b.dataset.effect === m.effect));
+  $('#maker-share').hidden = !m.editingId;
+  $('#maker-delete').hidden = !m.editingId;
+  renderHeader();
+  renderDock();
+}
 
-  // Start-from menu
-  const startFrom = $('#maker-start');
-  startFrom.replaceChildren(
-    el('option', { value: '', text: 'Start from…' }),
-    el('option', { value: 'blank', text: 'Blank (all off)' }),
-    el('optgroup', { label: 'Built-in' }, BUILTIN.map(p => el('option', { value: p.id, text: p.name }))),
-    saved.length && el('optgroup', { label: 'Saved' }, saved.map(p => el('option', { value: p.id, text: p.name }))));
+function renderHeader() {
+  const m = maker;
+  const g = groupById(m.gid);
+  $('#maker-title').textContent = m.name || 'New pattern';
+  $('#maker-title').classList.toggle('placeholder', !m.name);
+  $('#maker-sub').textContent = `${g.name} · ${m.n} lights`;
+  $('#maker-undo').disabled = !m.history.length;
+  const dirty = isDirty();
+  $('#maker-save').textContent = m.editingId && !dirty ? 'Saved ✓' : 'Save';
+  $('#maker-save').classList.toggle('primary', dirty);
+}
 
-  // Brush colours
+function renderSeq() {
+  const m = maker;
+  $('#seq-grid').replaceChildren(
+    ...m.seq.map((x, i) => cellEl('seq', i, x, i + 1)),
+    m.seq.length < MAX_SEQ ? el('button', { class: 'add-cell', 'aria-label': 'Add a light to the pattern', title: 'Add a light', onclick: addSeqLight }, '+') : null);
+  $('#seq-count').textContent = `Repeats every ${m.seq.length} light${m.seq.length === 1 ? '' : 's'}`;
+  $('#seq-remove').hidden = m.seq.length <= 1;
+}
+
+function renderHouse() {
+  const m = maker;
+  const g = groupById(m.gid);
+  const cells = makerCells();
+  const pos = positions(g.lights, g.id);
+  const rows = [];
+  let i = 0;
+  for (const l of g.lights) {
+    const len = pos.filter(p => p.light === l).length;
+    const row = [];
+    for (let k = 0; k < len; k++, i++) {
+      const node = cellEl('house', i, cells[i], k + 1);
+      if (m.overrides[i]) node.classList.add('changed');
+      row.push(node);
+    }
+    rows.push(el('div', { class: 'strip-row' },
+      el('div', { class: 'muted small', text: `${l.label} · ${len} light${len === 1 ? '' : 's'}` }),
+      el('div', { class: 'grid house' }, row)));
+  }
+  $('#house-grid').replaceChildren(...rows);
+  const changed = Object.keys(m.overrides).length;
+  $('#overrides-note').hidden = !changed;
+  $('#overrides-count').textContent = `${changed} light${changed === 1 ? '' : 's'} changed by hand (dotted)`;
+}
+
+function renderDock() {
+  const m = maker;
   $('#brush-colors').replaceChildren(
     ...COLORS.map(c => sw(c.css, c.name, () => setBrush(c.api), { class: 'swatch-btn' + (m.brush.c === c.api && m.brush.b > 0 ? ' active' : '') })),
     el('input', {
@@ -729,73 +831,101 @@ function renderMaker() {
       title: 'Any colour', 'aria-label': 'Pick any colour',
       value: m.brush.c.startsWith('#') ? m.brush.c : '#ff8800', onchange: e => setBrush(e.target.value),
     }),
-    el('button', { class: 'swatch-btn off-swatch' + (m.brush.b === 0 ? ' active' : ''), title: 'Off', 'aria-label': 'Off', onclick: () => { m.brush = { ...m.brush, b: 0 }; renderMaker(); } }, 'Off'));
-  $('#brush-levels').replaceChildren(...BRIGHTNESS.map(([v, t]) =>
-    el('button', { class: 'small' + (m.brush.b === v ? ' active' : ''), onclick: () => { m.brush = { ...m.brush, b: v }; renderMaker(); } }, t)));
-
-
-  // Loop
-  $('#loop-len').textContent = m.loop.length;
-  $('#loop-grid').replaceChildren(...m.loop.map((x, i) => cellEl('loop', i, x, i + 1)));
-  $('#repeat-btn').textContent = `Repeat loop across all ${m.n} lights ↓`;
-
-  // Full string, split by strip
-  const pos = positions(g.lights, g.id);
-  const rows = [];
-  let i = 0;
-  for (const l of g.lights) {
-    const len = pos.filter(p => p.light === l).length;
-    const cells = [];
-    for (let k = 0; k < len; k++, i++) cells.push(cellEl('full', i, m.cells[i], k + 1));
-    rows.push(el('div', { class: 'strip-row' },
-      el('div', { class: 'muted small', text: `${l.label} · ${len} light${len === 1 ? '' : 's'}${gp(g.id).reversed[l.id] ? ' (reversed)' : ''}` }),
-      el('div', { class: 'grid full', 'data-kind': 'full' }, cells)));
-  }
-  $('#full-grid').replaceChildren(...rows);
-
-  $('#maker-effect').value = m.effect;
-  $('#maker-delete').hidden = !m.editingId;
-  $('#maker-share').hidden = !m.editingId;
+    el('button', {
+      class: 'swatch-btn off-swatch' + (m.brush.b === 0 ? ' active' : ''), title: 'Off', 'aria-label': 'Off (light turned off)',
+      onclick: () => { m.brush = { ...m.brush, b: 0 }; renderDock(); },
+    }, 'Off'));
+  $('#brush-levels').replaceChildren(...BRIGHTNESS.map(([v, t]) => el('button', {
+    class: m.brush.b === v ? 'active' : '',
+    disabled: m.brush.b === 0,
+    'aria-label': `Brightness ${t}`,
+    onclick: () => { m.level = v; m.brush = { ...m.brush, b: v }; renderDock(); },
+  }, t)));
+  const upToDate = m.sent === sendKey();
+  const btn = $('#maker-preview');
+  btn.textContent = upToDate ? '✓ On house' : '💡 Show on house';
+  btn.classList.toggle('primary', !upToDate);
+  btn.classList.toggle('done', upToDate);
 }
 
 function cellEl(kind, i, x, label) {
-  const node = el('div', { class: 'cell', 'data-kind': kind, 'data-i': i, title: `Light ${label}` });
+  const node = el('div', { class: 'cell', 'data-kind': kind, 'data-i': i, role: 'button', 'aria-label': `Light ${label}` });
   paintCellEl(node, x);
   return node;
 }
 
 function setBrush(c) {
-  maker.brush = { c, b: maker.brush.b > 0 ? maker.brush.b : 1 };
-  renderMaker();
+  maker.brush = { c, b: maker.level || 1 };
+  renderDock();
 }
 
-// Tap or drag across cells to paint them with the brush.
+function afterEdit() {
+  renderHouse();
+  renderHeader();
+  renderDock();
+}
+
+function addSeqLight() {
+  remember();
+  maker.seq.push({ ...maker.brush });
+  renderSeq();
+  afterEdit();
+}
+
+function startFrom(q) {
+  remember();
+  maker.seq = clone(q.seq || q.pattern.loop);
+  maker.overrides = q.pattern ? overridesFor(q.pattern, maker.seq, maker.n) : {};
+  if (q.pattern) maker.effect = q.pattern.effect || 'none';
+  renderMaker();
+  showActivity(`Started from ${q.name} — tap ↶ to undo`, 'ok');
+}
+
+// Painting the repeating pattern: tap, or drag sideways across it.
 let painting = false;
-function paintAt(target) {
-  const node = target?.closest?.('.cell[data-i]');
+let gestureRemembered = false;
+function paintSeqAt(target) {
+  const node = target?.closest?.('#seq-grid .cell[data-kind="seq"]');
   if (!node || !maker) return;
-  const list = node.dataset.kind === 'loop' ? maker.loop : maker.cells;
   const i = +node.dataset.i;
-  list[i] = { ...maker.brush };
-  paintCellEl(node, list[i]);
+  if (keyOf(maker.seq[i]) === keyOf(maker.brush)) return;
+  if (!gestureRemembered) { remember(); gestureRemembered = true; }
+  maker.seq[i] = { ...maker.brush };
+  paintCellEl(node, maker.seq[i]);
+  afterEdit();
 }
 document.addEventListener('pointerdown', e => {
-  if (!e.target.closest?.('#maker .cell')) return;
+  if (!e.target.closest?.('#seq-grid .cell[data-kind="seq"]')) return;
   painting = true;
-  e.preventDefault();
-  paintAt(e.target);
+  gestureRemembered = false;
+  paintSeqAt(e.target);
 });
 document.addEventListener('pointermove', e => {
-  if (painting) paintAt(document.elementFromPoint(e.clientX, e.clientY));
+  if (painting) paintSeqAt(document.elementFromPoint(e.clientX, e.clientY));
 });
 ['pointerup', 'pointercancel'].forEach(t => document.addEventListener(t, () => (painting = false)));
+
+// The house view: tap one light to change just that light (tap again to undo it).
+function tapHouseLight(i) {
+  const m = maker;
+  const base = tile(m.seq, m.n)[i];
+  const current = m.overrides[i] || base;
+  let next;
+  if (keyOf(current) === keyOf(m.brush)) next = m.overrides[i] ? null : undefined; // same colour: clear a hand change
+  else next = keyOf(base) === keyOf(m.brush) ? null : { ...m.brush };
+  if (next === undefined) return;
+  remember();
+  if (next) m.overrides[i] = next; else delete m.overrides[i];
+  afterEdit();
+}
 
 function makerPattern() {
   return {
     id: maker.editingId || `p-${Date.now().toString(36)}`,
-    name: ($('#maker-name').value.trim() || 'My pattern').slice(0, 40),
-    loop: maker.loop.map(x => ({ ...x })),
-    cells: maker.cells.map(x => ({ ...x })),
+    name: (maker.name || 'My pattern').slice(0, 40),
+    loop: clone(maker.seq),
+    overrides: clone(maker.overrides),
+    cells: makerCells(),
     effect: maker.effect,
   };
 }
@@ -1189,49 +1319,62 @@ $('#signout-btn').addEventListener('click', async () => {
 });
 
 // Pattern maker controls
-$('#maker-back').addEventListener('click', closeMaker);
-$('#maker-name').addEventListener('input', e => (maker.name = e.target.value));
-$('#maker-start').addEventListener('change', e => {
-  const v = e.target.value;
-  if (!v) return;
-  const name = maker.name;
-  if (v === 'blank') {
-    maker.loop = [{ ...OFF }, { ...OFF }];
-    maker.cells = tile(maker.loop, maker.n);
-  } else {
-    const pt = [...BUILTIN, ...saved].find(p => p.id === v);
-    const keepId = maker.editingId;
-    openMaker(maker.gid, pt);
-    if (pt.id.startsWith('b-')) { maker.editingId = keepId; maker.name = name; }
-  }
-  renderMaker();
+$('#maker-back').addEventListener('click', () => closeMaker());
+$('#maker-undo').addEventListener('click', undo);
+$('#maker-rename').addEventListener('click', () => {
+  const name = prompt('Name this pattern', maker.name || '')?.trim();
+  if (name == null || name === '') return;
+  maker.name = name.slice(0, 40);
+  renderHeader();
 });
-$('#loop-minus').addEventListener('click', () => {
-  if (maker.loop.length > 1) { maker.loop.pop(); renderMaker(); }
+$('#seq-remove').addEventListener('click', () => {
+  if (maker.seq.length <= 1) return;
+  remember();
+  maker.seq.pop();
+  renderSeq();
+  afterEdit();
 });
-$('#loop-plus').addEventListener('click', () => {
-  if (maker.loop.length < 24) { maker.loop.push({ ...OFF }); renderMaker(); }
+$('#house-grid').addEventListener('click', e => {
+  const node = e.target.closest('.cell[data-kind="house"]');
+  if (node) tapHouseLight(+node.dataset.i);
 });
-$('#repeat-btn').addEventListener('click', () => {
-  maker.cells = tile(maker.loop, maker.n);
-  renderMaker();
-  showActivity(`✓ Loop of ${maker.loop.length} repeated across ${maker.n} lights — tap “Preview on house” to see it`, 'ok');
+$('#overrides-reset').addEventListener('click', () => {
+  remember();
+  maker.overrides = {};
+  afterEdit();
 });
-$('#maker-effect').addEventListener('change', e => (maker.effect = e.target.value));
+document.querySelectorAll('#effect-seg button').forEach(b => b.addEventListener('click', () => {
+  if (maker.effect === b.dataset.effect) return;
+  remember();
+  maker.effect = b.dataset.effect;
+  document.querySelectorAll('#effect-seg button').forEach(x => x.classList.toggle('active', x === b));
+  renderHeader();
+  renderDock();
+}));
 $('#maker-preview').addEventListener('click', () => {
-  const g = groupById(maker.gid);
-  const cells = maker.cells.map(x => ({ ...x }));
-  run(`Preview · ${g.name}`, () => paintGroup(g, cells, maker.effect));
+  const m = maker;
+  const g = groupById(m.gid);
+  const cells = makerCells(m);
+  const key = sendKey(m);
+  run(`Show on house · ${g.name}`, async () => {
+    await paintGroup(g, cells, m.effect);
+    m.sent = key;
+  }).then(() => { if (maker === m) renderDock(); });
 });
 $('#maker-save').addEventListener('click', () => {
+  if (!maker.name) {
+    const name = prompt('Name this pattern', '')?.trim();
+    if (!name) return;
+    maker.name = name.slice(0, 40);
+  }
   const pt = makerPattern();
   const i = saved.findIndex(p => p.id === pt.id);
   if (i >= 0) saved[i] = pt; else saved.push(pt);
   savePatterns();
   maker.editingId = pt.id;
-  maker.name = pt.name;
+  maker.savedState = editState();
   renderMaker();
-  showActivity(`✓ Saved “${pt.name}” — it’s now in your Patterns`, 'ok');
+  showActivity(`✓ Saved “${pt.name}” — it’s in your Patterns`, 'ok');
 });
 $('#maker-share').addEventListener('click', () => sharePattern(makerPattern()));
 $('#maker-delete').addEventListener('click', () => {
@@ -1240,7 +1383,7 @@ $('#maker-delete').addEventListener('click', () => {
   saved = saved.filter(p => p.id !== pt.id);
   savePatterns();
   showActivity(`Deleted “${pt.name}”`, 'ok');
-  closeMaker();
+  closeMaker(true);
 });
 
 document.addEventListener('visibilitychange', () => {

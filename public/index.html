@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-1">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-2">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -76,57 +76,62 @@
 
   <!-- Pattern maker -->
   <section id="maker" class="screen" hidden>
-    <header class="topbar">
-      <button id="maker-back" class="link">‹ Back</button>
-      <div class="grow center">
-        <h1 class="h-small">Pattern maker</h1>
-        <p id="maker-title" class="muted small"></p>
-      </div>
-      <button id="maker-save" class="small">💾 Save</button>
+    <header class="maker-head">
+      <button id="maker-back" class="icon-btn" aria-label="Back">‹</button>
+      <button id="maker-rename" class="title-btn" aria-label="Rename pattern">
+        <span class="title-line"><span id="maker-title">New pattern</span><span class="pencil" aria-hidden="true">✎</span></span>
+        <span id="maker-sub" class="muted small"></span>
+      </button>
+      <button id="maker-undo" class="icon-btn" aria-label="Undo" title="Undo">↶</button>
+      <button id="maker-save" class="small">Save</button>
     </header>
 
     <div class="card">
-      <input id="maker-name" type="text" maxlength="40" placeholder="Pattern name (e.g. Candy Cane)">
-      <select id="maker-start" style="margin-top:10px; width:100%"></select>
-      <div class="row" style="margin-top:10px">
-        <button id="maker-share" class="small" hidden>📤 Share with family</button>
-        <button id="maker-delete" class="small danger" hidden>Delete</button>
+      <h3 class="first">Start from</h3>
+      <div id="quick-starts" class="chip-scroll"></div>
+      <div id="saved-row" hidden>
+        <h3>Your patterns — tap to edit</h3>
+        <div id="saved-patterns" class="chip-scroll"></div>
       </div>
     </div>
 
     <div class="card">
-      <div class="loop-head">
-        <h3 style="margin:0">Loop</h3>
-        <div class="stepper">
-          <button id="loop-minus" class="small" aria-label="Shorter loop">−</button>
-          <span><span id="loop-len">2</span> lights</span>
-          <button id="loop-plus" class="small" aria-label="Longer loop">+</button>
-        </div>
+      <h3 class="first">Repeating pattern</h3>
+      <p class="muted small">Pick a colour at the bottom, then tap these lights (or drag across them). This repeats all the way around your house.</p>
+      <div id="seq-grid" class="grid seq"></div>
+      <div class="seq-foot">
+        <span id="seq-count" class="muted small"></span>
+        <button id="seq-remove" class="link small">Remove last light</button>
       </div>
-      <p class="muted small">Pick a colour and brightness in the bar at the bottom, then tap or drag across lights to paint them. Build the first few lights, then repeat them across the whole string.</p>
-      <div id="loop-grid" class="grid loop" data-kind="loop"></div>
-      <button id="repeat-btn" class="primary wide"></button>
     </div>
 
     <div class="card">
-      <h3 style="margin-top:0">Whole string</h3>
-      <p class="muted small">Every light, in order around the house. Tap any light to change just that one.</p>
-      <div id="full-grid"></div>
-      <label class="inline" style="margin-top:12px">Effect
-        <select id="maker-effect">
-          <option value="none">None (steady)</option>
-          <option value="chase">Chase forward</option>
-          <option value="chase-back">Chase backward</option>
-        </select>
-      </label>
+      <h3 class="first">On your house</h3>
+      <p class="muted small">Exactly what your lights will show. Tap any light to change just that one.</p>
+      <div id="overrides-note" class="override-note" hidden>
+        <span id="overrides-count"></span>
+        <button id="overrides-reset" class="link small">Reset</button>
+      </div>
+      <div id="house-grid"></div>
+      <h3>Motion</h3>
+      <div id="effect-seg" class="segmented" role="group" aria-label="Motion">
+        <button data-effect="none">Steady</button>
+        <button data-effect="chase">Chase →</button>
+        <button data-effect="chase-back">← Chase</button>
+      </div>
     </div>
 
-    <!-- Paint dock: always visible while painting -->
+    <div class="row maker-extra">
+      <button id="maker-share" class="small" hidden>📤 Share with family</button>
+      <button id="maker-delete" class="small danger" hidden>Delete pattern</button>
+    </div>
+
+    <!-- Paint bar: always in reach while painting -->
     <div class="maker-dock">
       <div id="brush-colors" class="dock-swatches"></div>
       <div class="dock-row">
         <div id="brush-levels" class="levels"></div>
-        <button id="maker-preview" class="primary">💡 Preview</button>
+        <button id="maker-preview" class="primary">💡 Show on house</button>
       </div>
     </div>
   </section>
@@ -162,6 +167,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-1"></script>
+  <script src="app.js?v=2026.11.24-2"></script>
 </body>
 </html>
