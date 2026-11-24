@@ -9,6 +9,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { createApp } from '../lib/server.js';
 import { createMemoryStore } from '../lib/store.js';
+import { planFor } from '../public/shared/schedule-core.js';
 
 const ORIGIN = 'http://localhost:3000';
 const ENV = {
@@ -88,19 +89,25 @@ class FakeAuthenticator {
 
 // ---------- harness ----------
 
-function setup({ env = ENV, withStore = true } = {}) {
+function setup({ env = ENV, withStore = true, lifxFails = false } = {}) {
   let clock = Date.parse('2026-11-23T12:00:00Z');
   const now = () => clock;
   const store = withStore ? createMemoryStore(now) : null;
   const lifxCalls = [];
   const fetchImpl = async (url, init) => {
     lifxCalls.push({ url, method: init.method, token: init.headers.authorization, body: init.body ? JSON.parse(init.body) : null });
+    if (lifxFails) return new Response('{"error":"offline"}', { status: 503 });
     if (init.headers.authorization === 'Bearer tok-bad') return new Response('{"error":"Bad token"}', { status: 401 });
     if (init.method === 'GET') return new Response(JSON.stringify([{ id: 'd073', label: 'Roofline' }]), { status: 200 });
     return new Response('{"results":[{"id":"d073","status":"ok"}]}', { status: 207 });
   };
-  const app = createApp({ store, env, fetchImpl, now });
-  return { app, store, lifxCalls, advance: ms => (clock += ms) };
+  const timerInstalls = [];
+  const app = createApp({
+    store, env, fetchImpl, now,
+    verifyCron: async ({ signature, url }) => signature.startsWith('good') && url.endsWith('/api/cron/tick'),
+    timer: { configured: () => true, install: async destination => { timerInstalls.push(destination); } },
+  });
+  return { app, store, lifxCalls, timerInstalls, advance: ms => (clock += ms), setClock: t => (clock = t) };
 }
 
 function client(app, origin = ORIGIN) {
@@ -425,4 +432,119 @@ test('requests routed through the Vercel rewrite (?route=) work the same', async
   const res = await app(new Request(`${ORIGIN}/api/handler?route=me`));
   assert.equal(res.status, 401);
   assert.equal((await res.json()).setupNeeded, true);
+});
+
+
+// ---------- schedules ----------
+
+const NYC = { lat: 40.7128, lon: -74.006, tz: 'America/New_York' };
+const schedule = (extra = {}) => ({
+  groupId: 'g-holiday', groupName: 'Holiday', enabled: true,
+  on: { mode: 'sunset', offsetMin: 0, time: '17:00', fadeMin: 60 },
+  off: { time: '23:00', fadeMin: 30 },
+  days: [0, 1, 2, 3, 4, 5, 6], season: null, skipDates: [], level: 0.8,
+  location: NYC,
+  pattern: {
+    name: 'Candy',
+    states: [{ selector: 'id:d073|0-4', color: 'hue:0 saturation:1', brightness: 1 }, { selector: 'id:d073|5-9', color: 'kelvin:4000 saturation:0', brightness: 0.5 }],
+    motion: { type: 'chase', dir: 'forward', speed: 0.5 },
+  },
+  ...extra,
+});
+const tickReq = (app, signature) => app(new Request(`${ORIGIN}/api/cron/tick`, {
+  method: 'POST', headers: { 'content-type': 'application/json', 'upstash-signature': signature }, body: '{}',
+}));
+
+test('schedules: save, list, validate, and keep houses separate', async () => {
+  const { app, timerInstalls } = setup();
+  const { admin } = await setUpAdmin(app);
+  const { person } = await invitePerson(app, admin, ['mom_and_dad']);
+
+  const saved = await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ location: { lat: 40.712812, lon: -74.006015, tz: NYC.tz } }) });
+  assert.equal(saved.status, 200, JSON.stringify(saved.body));
+  assert.deepEqual(saved.body.schedule.location, { lat: 40.71, lon: -74.01, tz: NYC.tz }, 'only a town-level location is kept');
+  assert.equal(timerInstalls.length, 1);
+  assert.match(timerInstalls[0], /\/api\/cron\/tick$/);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  assert.equal(timerInstalls.length, 1, 'the timer is only installed once');
+
+  const list = await admin.call('GET', 'schedules/home');
+  assert.equal(list.body.schedules.length, 1);
+  assert.equal(list.body.timer.configured, true);
+
+  for (const broken of [
+    { on: { mode: 'moon', offsetMin: 0, time: '17:00', fadeMin: 60 } },
+    { off: { time: '25:00', fadeMin: 30 } },
+    { days: [] },
+    { level: 3 },
+    { location: { lat: 40, lon: -74, tz: 'Mars/Olympus' } },
+    { pattern: { name: 'x', states: [{ selector: 'all', color: 'red', brightness: 1 }] } },
+    { pattern: { name: 'x', states: [{ selector: 'id:abc', color: '<script>', brightness: 1 }] } },
+  ]) {
+    const res = await admin.call('PUT', 'schedules/home/evening02', { schedule: schedule(broken) });
+    assert.equal(res.status, 400, `should refuse ${JSON.stringify(broken)}`);
+  }
+
+  assert.equal((await person.call('GET', 'schedules/home')).status, 403);
+  assert.equal((await person.call('PUT', 'schedules/home/evening01', { schedule: schedule() })).status, 403);
+  assert.equal((await person.call('PUT', 'schedules/mom_and_dad/evening01', { schedule: schedule() })).status, 200);
+  assert.equal((await admin.call('DELETE', 'schedules/home/evening01')).status, 200);
+  assert.equal((await admin.call('GET', 'schedules/home')).body.schedules.length, 0);
+});
+
+test('the timer only accepts signed calls and refuses replays', async () => {
+  const { app } = setup();
+  assert.equal((await tickReq(app, '')).status, 401);
+  assert.equal((await tickReq(app, 'forged')).status, 401);
+  const ok = await tickReq(app, 'good-1');
+  assert.equal(ok.status, 200);
+  assert.equal((await (await tickReq(app, 'good-1')).json()).replay, true);
+});
+
+test('timer fades on by sunset, starts the motion, then fades off — each exactly once', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  let n = 0;
+  const tickAt = async t => { setClock(t); return (await tickReq(app, `good-${n++}`)).json(); };
+
+  lifxCalls.length = 0;
+  let r = await tickAt(plan.fadeInStart.getTime() + 2 * 60000);
+  assert.deepEqual(r.ran.map(x => x.kind), ['fade-in']);
+  const [off, dark, up] = lifxCalls;
+  assert.equal(off.url, 'https://api.lifx.com/v1/lights/group_id%3Ag-holiday/effects/off');
+  assert.equal(off.token, 'Bearer tok-home');
+  assert.deepEqual(dark.body.states.map(st => st.brightness), [0, 0]);
+  assert.deepEqual(dark.body.defaults, { power: 'on', duration: 0 });
+  assert.deepEqual(up.body.states.map(st => st.brightness), [0.8, 0.4], 'scaled by the schedule brightness');
+  assert.ok(Math.abs(up.body.defaults.duration - 58 * 60) <= 1, 'started 2 minutes late, still finishes at sunset');
+
+  r = await tickAt(plan.fadeInStart.getTime() + 7 * 60000);
+  assert.deepEqual(r.ran, [], 'not run twice');
+
+  lifxCalls.length = 0;
+  r = await tickAt(plan.fullOn.getTime() + 60000);
+  assert.deepEqual(r.ran.map(x => x.kind), ['motion']);
+  assert.match(lifxCalls[0].url, /effects\/move$/);
+
+  lifxCalls.length = 0;
+  r = await tickAt(plan.fadeOutStart.getTime() + 3 * 60000);
+  assert.deepEqual(r.ran.map(x => x.kind), ['fade-out']);
+  assert.deepEqual(lifxCalls.at(-1).body, { power: 'off', duration: 27 * 60 });
+});
+
+test('a fade that fails (lights offline) is retried on the next tick', async () => {
+  const env = { ...ENV };
+  const first = setup({ env, lifxFails: true });
+  const { admin } = await setUpAdmin(first.app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  first.setClock(plan.fadeOutStart.getTime() + 60000);
+  const r = await (await tickReq(first.app, 'good-a')).json();
+  assert.equal(r.ran[0].kind, 'fade-out');
+  assert.ok(r.ran[0].error);
+  first.setClock(plan.fadeOutStart.getTime() + 6 * 60000);
+  const again = await (await tickReq(first.app, 'good-b')).json();
+  assert.equal(again.ran[0].kind, 'fade-out', 'tried again');
 });

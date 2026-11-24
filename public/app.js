@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2026.11.24-5';
+const APP_VERSION = '2026.11.24-6';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
@@ -65,6 +65,9 @@ let lights = [];
 let groupPrefs = {};      // per-group settings for the current house (synced)
 let saved = [];           // this person's saved patterns (synced)
 let identifySnapshot = null; // { gid, lights: [...] } to restore after Identify
+let core = null;          // shared schedule maths (loaded on demand)
+let schedules = {};       // groupId -> schedule, for the current house
+let timerInfo = null;     // { configured, lastTick }
 
 const $ = sel => document.querySelector(sel);
 
@@ -636,7 +639,8 @@ function groupCard(g) {
     el('button', { class: 'primary wide', style: 'margin-top:12px', onclick: () => openMaker(g.id) }, '✏️ Make or edit a pattern'),
     el('div', { class: 'row', style: 'margin-top:10px' },
       el('button', { onclick: () => run(`Chase · ${g.name}`, () => chase(sel)) }, '▶︎ Chase'),
-      el('button', { onclick: () => run(`Stop · ${g.name}`, () => effectsOff(sel)) }, '■ Stop')));
+      el('button', { onclick: () => run(`Stop · ${g.name}`, () => effectsOff(sel)) }, '■ Stop')),
+    !demo && scheduleRow(g));
 
   if (multi && !p.ordered) {
     card.append(el('p', { class: 'hint' },
@@ -1139,6 +1143,290 @@ function makerPattern() {
   };
 }
 
+// ---------- Schedules ----------
+// Fade on so the lights are fully on at sunset (or a set time), then start
+// fading off at a set time. The server runs it; the app shows the evening as a
+// timeline so you can see exactly what will happen tonight.
+
+async function loadCore() {
+  core ??= await import(`/shared/schedule-core.js?v=${APP_VERSION}`);
+  return core;
+}
+
+const scheduleId = gid => `s-${gid}`.slice(0, 32);
+
+function fmtTime(d, tz) {
+  return d ? d.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit', timeZone: tz }) : '—';
+}
+function fmtDur(min) {
+  if (!min) return 'instantly';
+  const h = Math.floor(min / 60), m = min % 60;
+  return [h && `${h} hr`, m && `${m} min`].filter(Boolean).join(' ');
+}
+const SKIP_TEXT = { paused: 'Paused', day: 'Not scheduled tonight', season: 'Outside the season', skipped: 'Skipped tonight', 'no-sunset': 'No sunset here today' };
+
+function eveningSummary(s) {
+  if (!core || !s?.location) return '';
+  const tz = s.location.tz;
+  const now = new Date();
+  const plan = core.currentPlan(s, now);
+  if (plan.skip) {
+    const next = core.nextRun(s, now);
+    const when = next ? new Date(next.fullOn).toLocaleDateString([], { weekday: 'short', timeZone: tz }) : null;
+    return `${SKIP_TEXT[plan.skip] || 'Off tonight'}${next ? ` · next ${when}` : ''}`;
+  }
+  const t = d => fmtTime(d, tz);
+  return `Tonight · on ${t(plan.fadeInStart)} → ${t(plan.fullOn)} · off ${t(plan.fadeOutStart)} → ${t(plan.offAt)}`;
+}
+
+function scheduleRow(g) {
+  const s = schedules[g.id];
+  if (!s) {
+    return el('button', { class: 'schedule-row empty', onclick: () => openSchedule(g) },
+      el('span', { class: 'sched-icon', text: '🌙' }),
+      el('span', { class: 'grow' }, el('strong', { text: 'Add a schedule' }), el('span', { class: 'muted small', text: 'Fade on at sunset, fade off at bedtime' })),
+      el('span', { class: 'chev', text: '›' }));
+  }
+  const row = el('div', { class: 'schedule-row' + (s.enabled ? '' : ' paused') },
+    el('button', { class: 'sched-open', onclick: () => openSchedule(g) },
+      el('span', { class: 'sched-icon', text: '🌙' }),
+      el('span', { class: 'grow' }, el('strong', { text: 'Schedule' }), el('span', { class: 'muted small', text: s.enabled ? eveningSummary(s) : 'Paused' }))),
+    toggleSwitch(s.enabled, false, async e => {
+      const enabled = e.target.checked;
+      try {
+        const res = await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: { ...s, enabled } });
+        schedules[g.id] = res.schedule;
+        showActivity(enabled ? '✓ Schedule on' : 'Schedule paused', 'ok');
+      } catch (err) { showActivity(err.message, 'err'); }
+      renderMain();
+    }));
+  return row;
+}
+
+let sched = null; // the schedule being edited: { g, s, dirty }
+
+async function openSchedule(g) {
+  await loadCore();
+  const existing = schedules[g.id];
+  const defaultPattern = saved[0] || BUILTIN[0];
+  const s = existing ? clone(existing) : {
+    ...clone(core.DEFAULT_SCHEDULE),
+    id: scheduleId(g.id),
+    groupId: g.id,
+    groupName: g.name,
+    location: Object.values(schedules).find(x => x.location)?.location || null,
+    pattern: { name: defaultPattern.name, motion: normalizeMotion(defaultPattern.effect, defaultPattern.motion) },
+  };
+  sched = { g, s, isNew: !existing, start: JSON.stringify(s) };
+  show('sched');
+  window.scrollTo(0, 0);
+  renderSchedule();
+}
+
+function closeSchedule(force = false) {
+  if (!force && sched && JSON.stringify(sched.s) !== sched.start && !confirm('Leave without saving your schedule changes?')) return;
+  sched = null;
+  show('main');
+  renderMain();
+}
+
+function patternChoices() {
+  return [...saved.map(p => ({ ...p, label: `⭐ ${p.name}` })), ...BUILTIN.map(p => ({ ...p, label: p.name }))];
+}
+
+function renderSchedule() {
+  const { g, s } = sched;
+  $('#sched-sub').textContent = `${g.name} · ${house.name}`;
+  $('#sched-save').textContent = sched.isNew ? 'Save' : JSON.stringify(s) === sched.start ? 'Saved ✓' : 'Save';
+  $('#sched-save').classList.toggle('primary', JSON.stringify(s) !== sched.start || sched.isNew);
+
+  // Lights on
+  document.querySelectorAll('#on-mode button').forEach(b => b.classList.toggle('active', b.dataset.mode === s.on.mode));
+  $('#on-sunset-row').hidden = s.on.mode !== 'sunset';
+  $('#on-time-row').hidden = s.on.mode !== 'time';
+  $('#on-offset').value = s.on.offsetMin;
+  const off = s.on.offsetMin;
+  $('#on-offset-label').textContent = off === 0 ? 'Right at sunset' : `${Math.abs(off)} min ${off < 0 ? 'before' : 'after'} sunset`;
+  $('#on-time').value = s.on.time;
+  $('#on-fade').value = s.on.fadeMin;
+  $('#on-fade-label').textContent = s.on.fadeMin ? `Fade in over ${fmtDur(s.on.fadeMin)}` : 'Turn on instantly';
+
+  // Lights off
+  $('#off-time').value = s.off.time;
+  $('#off-fade').value = s.off.fadeMin;
+  $('#off-fade-label').textContent = s.off.fadeMin ? `Fade out over ${fmtDur(s.off.fadeMin)}` : 'Turn off instantly';
+
+  // What to show
+  $('#sched-patterns').replaceChildren(...patternChoices().map(p => el('button', {
+    class: 'small' + (p.name === s.pattern.name ? ' active' : ''),
+    onclick: () => {
+      s.pattern = { name: p.name, motion: normalizeMotion(p.effect, p.motion) };
+      renderSchedule();
+    },
+  }, p.label)));
+  $('#sched-level').value = Math.round(s.level * 100);
+  $('#sched-level-label').textContent = `${Math.round(s.level * 100)}%`;
+
+  // Days
+  document.querySelectorAll('#sched-days button').forEach(b => b.classList.toggle('active', s.days.includes(+b.dataset.day)));
+  $('#season-on').checked = !!s.season;
+  $('#season-fields').hidden = !s.season;
+  if (s.season) {
+    const yr = new Date().getFullYear();
+    $('#season-from').value = `${yr}-${s.season.from}`;
+    $('#season-to').value = `${s.season.from <= s.season.to ? yr : yr + 1}-${s.season.to}`;
+  }
+
+  // Location
+  $('#loc-text').textContent = s.location
+    ? `Sunset times for ${s.location.lat.toFixed(2)}, ${s.location.lon.toFixed(2)} (${s.location.tz.replace(/_/g, ' ')})`
+    : 'Needed once, to work out sunset at this house.';
+  $('#loc-btn').textContent = s.location ? 'Update' : '📍 Use my location';
+  $('#loc-btn').classList.toggle('primary', !s.location);
+
+  // Tonight
+  const today = s.location ? core.ymd(core.zonedParts(new Date(), s.location.tz)) : null;
+  $('#skip-btn').hidden = sched.isNew || !s.location;
+  $('#skip-btn').textContent = s.skipDates.includes(today) ? '↩︎ Run tonight after all' : '⏭ Skip tonight';
+  $('#sched-delete').hidden = sched.isNew;
+  $('#sched-enabled').checked = s.enabled;
+
+  // Timer health (only once something is saved)
+  const stale = !timerInfo?.lastTick || Date.now() - timerInfo.lastTick > 20 * 60000;
+  $('#timer-warning').hidden = sched.isNew || !timerInfo || (timerInfo.configured && !stale);
+  $('#timer-warning').textContent = !timerInfo?.configured
+    ? '⚠️ The schedule timer isn’t set up on the server yet, so this won’t run.'
+    : '⏳ Waiting for the schedule timer to check in (it runs every 5 minutes).';
+
+  renderTimeline();
+}
+
+// The evening as a picture: dark sky after sunset, a warm glow that ramps up,
+// holds, and ramps down.
+function renderTimeline() {
+  const { s } = sched;
+  const box = $('#timeline');
+  if (!s.location) {
+    box.replaceChildren(el('div', { class: 'timeline-empty muted small', text: 'Add your location below to see tonight’s timeline.' }));
+    $('#timeline-caption').textContent = '';
+    return;
+  }
+  const tz = s.location.tz;
+  const now = new Date();
+  const todayParts = core.zonedParts(now, tz);
+  const today = { y: todayParts.y, m: todayParts.m, d: todayParts.d };
+  // Preview tonight even if it is skipped or paused, so the shape is always visible.
+  const preview = core.planFor({ ...s, enabled: true, days: [0, 1, 2, 3, 4, 5, 6], season: null, skipDates: [] }, today);
+  const real = core.planFor(s, today);
+  if (!preview.fullOn) {
+    box.replaceChildren(el('div', { class: 'timeline-empty muted small', text: 'No sunset at this location today.' }));
+    return;
+  }
+  const t0 = Math.min(preview.fadeInStart, preview.sunset ?? Infinity) - 60 * 60000;
+  const t1 = preview.offAt.getTime() + 45 * 60000;
+  const W = 340, H = 150, top = 24, base = 112;
+  const x = t => 8 + ((t - t0) / (t1 - t0)) * (W - 16);
+  const y = level => base - level * (base - top);
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+  svg.setAttribute('role', 'img');
+  const add = (tag, attrs, text) => {
+    const n = document.createElementNS(NS, tag);
+    for (const [k, v] of Object.entries(attrs)) n.setAttribute(k, v);
+    if (text != null) n.textContent = text;
+    svg.append(n);
+    return n;
+  };
+  const sunsetX = preview.sunset ? x(preview.sunset) : x(preview.fullOn);
+  const defs = add('defs', {});
+  defs.innerHTML = `
+    <linearGradient id="sky" x1="0" x2="1" y1="0" y2="0">
+      <stop offset="0" stop-color="#2a3550"/>
+      <stop offset="${Math.max(0, (sunsetX - 30) / W)}" stop-color="#3a3350"/>
+      <stop offset="${Math.min(1, (sunsetX + 10) / W)}" stop-color="#1a1d2e"/>
+      <stop offset="1" stop-color="#0d0f18"/>
+    </linearGradient>
+    <linearGradient id="glow" x1="0" x2="0" y1="0" y2="1">
+      <stop offset="0" stop-color="#ffcf7a" stop-opacity=".95"/>
+      <stop offset="1" stop-color="#ff9f43" stop-opacity=".15"/>
+    </linearGradient>`;
+  add('rect', { x: 0, y: 0, width: W, height: base + 4, rx: 12, fill: 'url(#sky)' });
+
+  // Hour ticks
+  const startHour = new Date(t0);
+  startHour.setMinutes(0, 0, 0);
+  for (let t = startHour.getTime() + 3600000; t < t1; t += 3600000) {
+    const label = new Date(t).toLocaleTimeString([], { hour: 'numeric', timeZone: tz });
+    if (core.zonedParts(new Date(t), tz).hh % 2) continue;
+    add('line', { x1: x(t), x2: x(t), y1: base, y2: base + 5, stroke: '#4a505c' });
+    add('text', { x: x(t), y: base + 16, 'text-anchor': 'middle', class: 'tl-hour' }, label.replace(/\s?[AP]M$/, '').trim() + (label.includes('PM') ? 'p' : 'a'));
+  }
+
+  // Glow shape
+  const lvl = s.level;
+  const pts = [[x(preview.fadeInStart), y(0)], [x(preview.fullOn), y(lvl)], [x(preview.fadeOutStart), y(lvl)], [x(preview.offAt), y(0)]];
+  add('polygon', { points: [...pts, [pts[3][0], base], [pts[0][0], base]].map(p => p.join(',')).join(' '), fill: 'url(#glow)', opacity: real.skip ? 0.25 : 1 });
+  add('polyline', { points: pts.map(p => p.join(',')).join(' '), fill: 'none', stroke: '#ffb547', 'stroke-width': 2.5, 'stroke-linejoin': 'round', opacity: real.skip ? 0.4 : 1 });
+
+  // Sunset marker
+  if (preview.sunset) {
+    add('line', { x1: sunsetX, x2: sunsetX, y1: 8, y2: base, stroke: '#ff8a5c', 'stroke-dasharray': '3 3' });
+    add('text', { x: sunsetX, y: 18, 'text-anchor': 'middle', class: 'tl-sun' }, `☀︎ ${fmtTime(preview.sunset, tz)}`);
+  }
+  // Now marker
+  if (now >= t0 && now <= t1) {
+    add('line', { x1: x(now), x2: x(now), y1: top - 6, y2: base, stroke: '#ffffff', 'stroke-opacity': 0.5 });
+    add('text', { x: x(now), y: base - 4, 'text-anchor': 'middle', class: 'tl-now' }, 'now');
+  }
+  // Key times under the curve
+  const marks = [[preview.fadeInStart, 'start'], [preview.fullOn, 'end'], [preview.fadeOutStart, 'start'], [preview.offAt, 'end']];
+  marks.forEach(([t, anchor], i) => add('text', {
+    x: x(t), y: base + 30, 'text-anchor': i % 2 ? 'start' : 'end', class: 'tl-time', dx: i % 2 ? 3 : -3,
+  }, fmtTime(t, tz)));
+  marks.forEach(([t]) => add('circle', { cx: x(t), cy: base, r: 3, fill: '#ffb547' }));
+  box.replaceChildren(svg);
+
+  const t = d => fmtTime(d, tz);
+  $('#timeline-caption').textContent = real.skip
+    ? `${SKIP_TEXT[real.skip] || 'Not running tonight'}. Shown as it would look.`
+    : `Fading on ${t(preview.fadeInStart)} → fully on ${t(preview.fullOn)}${preview.sunset && s.on.mode === 'sunset' && !s.on.offsetMin ? ' (sunset)' : ''}. Fading off ${t(preview.fadeOutStart)} → off by ${t(preview.offAt)}.`;
+}
+
+function setSched(change) {
+  Object.assign(sched.s, change);
+  renderSchedule();
+}
+
+async function saveSchedule() {
+  const { g, s } = sched;
+  if (!s.location) { alert('Add the house location first, so the app knows when sunset is.'); return; }
+  const pattern = patternChoices().find(p => p.name === s.pattern.name) || BUILTIN[0];
+  const pos = positions(g.lights, g.id);
+  const cells = patternCells(pattern, g.id, pos.length);
+  const body = {
+    ...s,
+    pattern: { name: pattern.name, states: cellsToStates(pos, cells, 1), motion: normalizeMotion(pattern.effect, pattern.motion) },
+  };
+  const btn = $('#sched-save');
+  btn.disabled = true;
+  try {
+    const res = await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: body });
+    schedules[g.id] = res.schedule;
+    if (res.timer) timerInfo = { ...timerInfo, ...res.timer };
+    if (res.timer?.error) showActivity('Saved, but the schedule timer couldn’t be switched on. Try saving again in a minute.', 'err');
+    else showActivity(`✓ Schedule saved · ${eveningSummary(res.schedule)}`, 'ok');
+    sched.s = clone(res.schedule);
+    sched.isNew = false;
+    sched.start = JSON.stringify(sched.s);
+    renderSchedule();
+  } catch (e) {
+    showActivity(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ---------- Sharing patterns ----------
 // A share link carries the pattern in the URL (#p=…). No token, no server.
 
@@ -1186,7 +1474,7 @@ function importFromHash() {
 // ---------- Screens and loading ----------
 
 function show(screen) {
-  for (const s of ['auth', 'main', 'maker']) $(`#${s}`).hidden = screen !== s;
+  for (const s of ['auth', 'main', 'maker', 'sched']) $(`#${s}`).hidden = screen !== s;
 }
 
 async function loadLights() {
@@ -1387,10 +1675,17 @@ async function setActive(h) {
   $('#status').textContent = '';
   $('#house-name').textContent = h.name;
   $('#groups').replaceChildren();
+  schedules = {};
   try {
-    const p = await server('GET', `prefs/house/${h.key}`);
+    const [p, sc] = await Promise.all([
+      server('GET', `prefs/house/${h.key}`),
+      server('GET', `schedules/${h.key}`),
+      loadCore(),
+    ]);
     if (house !== h) return; // switched again meanwhile
     groupPrefs = p.prefs.groups || {};
+    schedules = Object.fromEntries(sc.schedules.map(x => [x.groupId, x]));
+    timerInfo = sc.timer;
   } catch (e) {
     if (e.code === 'signed_out') return signedOut();
   }
@@ -1614,6 +1909,66 @@ $('#maker-delete').addEventListener('click', () => {
   savePatterns();
   showActivity(`Deleted “${pt.name}”`, 'ok');
   closeMaker(true);
+});
+
+// Schedule controls
+$('#sched-back').addEventListener('click', () => closeSchedule());
+$('#sched-save').addEventListener('click', saveSchedule);
+document.querySelectorAll('#on-mode button').forEach(b => b.addEventListener('click', () => setSched({ on: { ...sched.s.on, mode: b.dataset.mode } })));
+$('#on-offset').addEventListener('input', e => setSched({ on: { ...sched.s.on, offsetMin: +e.target.value } }));
+$('#on-time').addEventListener('change', e => e.target.value && setSched({ on: { ...sched.s.on, time: e.target.value } }));
+$('#on-fade').addEventListener('input', e => setSched({ on: { ...sched.s.on, fadeMin: +e.target.value } }));
+$('#off-time').addEventListener('change', e => e.target.value && setSched({ off: { ...sched.s.off, time: e.target.value } }));
+$('#off-fade').addEventListener('input', e => setSched({ off: { ...sched.s.off, fadeMin: +e.target.value } }));
+$('#sched-level').addEventListener('input', e => setSched({ level: +e.target.value / 100 }));
+$('#sched-enabled').addEventListener('change', e => setSched({ enabled: e.target.checked }));
+document.querySelectorAll('#sched-days button').forEach(b => b.addEventListener('click', () => {
+  const d = +b.dataset.day;
+  const days = sched.s.days.includes(d) ? sched.s.days.filter(x => x !== d) : [...sched.s.days, d].sort();
+  if (!days.length) return showActivity('Pick at least one day.', 'err');
+  setSched({ days });
+}));
+$('#season-on').addEventListener('change', e => {
+  // Default season: from today until just after New Year.
+  const t = new Date();
+  const from = `${String(t.getMonth() + 1).padStart(2, '0')}-${String(t.getDate()).padStart(2, '0')}`;
+  setSched({ season: e.target.checked ? { from, to: '01-06' } : null });
+});
+['#season-from', '#season-to'].forEach(id => $(id).addEventListener('change', () => {
+  const md = v => v && v.slice(5);
+  if (md($('#season-from').value) && md($('#season-to').value)) setSched({ season: { from: md($('#season-from').value), to: md($('#season-to').value) } });
+}));
+$('#loc-btn').addEventListener('click', () => {
+  if (!navigator.geolocation) return alert('This browser can’t share its location.');
+  $('#loc-btn').disabled = true;
+  navigator.geolocation.getCurrentPosition(pos => {
+    $('#loc-btn').disabled = false;
+    setSched({ location: {
+      lat: Math.round(pos.coords.latitude * 100) / 100,
+      lon: Math.round(pos.coords.longitude * 100) / 100,
+      tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    } });
+  }, err => {
+    $('#loc-btn').disabled = false;
+    alert(err.code === 1
+      ? 'Location is turned off for this app. Allow it in Settings › Privacy & Security › Location Services › Safari Websites, then try again.'
+      : 'Couldn’t get your location. Please try again.');
+  }, { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 });
+});
+$('#skip-btn').addEventListener('click', async () => {
+  const s = sched.s;
+  const today = core.ymd(core.zonedParts(new Date(), s.location.tz));
+  s.skipDates = s.skipDates.includes(today) ? s.skipDates.filter(d => d !== today) : [...s.skipDates, today];
+  await saveSchedule();
+});
+$('#sched-delete').addEventListener('click', async () => {
+  if (!confirm('Delete this schedule? Your lights won’t change on their own any more.')) return;
+  try {
+    await server('DELETE', `schedules/${house.key}/${sched.s.id}`);
+    delete schedules[sched.g.id];
+    showActivity('Schedule deleted', 'ok');
+    closeSchedule(true);
+  } catch (e) { showActivity(e.message, 'err'); }
 });
 
 document.addEventListener('visibilitychange', () => {

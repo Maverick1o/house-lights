@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-5">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-6">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -172,6 +172,100 @@
     </div>
   </section>
 
+  <!-- Schedule -->
+  <section id="sched" class="screen" hidden>
+    <header class="maker-head">
+      <button id="sched-back" class="icon-btn" aria-label="Back">‹</button>
+      <div class="title-btn" role="heading" aria-level="1">
+        <span class="title-line"><span id="sched-title">🌙 Schedule</span></span>
+        <span id="sched-sub" class="muted small"></span>
+      </div>
+      <button id="sched-save" class="small">Save</button>
+    </header>
+
+    <div class="card">
+      <div class="sched-top">
+        <h3 class="first">Tonight</h3>
+        <label class="inline small">On <span class="switch"><input id="sched-enabled" type="checkbox"><span></span></span></label>
+      </div>
+      <div id="timeline" class="timeline"></div>
+      <p id="timeline-caption" class="muted small"></p>
+      <p id="timer-warning" class="hint" hidden></p>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Lights on</h3>
+      <div id="on-mode" class="segmented two" role="group" aria-label="When to turn on">
+        <button data-mode="sunset">At sunset</button>
+        <button data-mode="time">At a set time</button>
+      </div>
+      <div id="on-sunset-row" class="field">
+        <div class="field-label"><span>Fully on</span><strong id="on-offset-label"></strong></div>
+        <input id="on-offset" type="range" min="-60" max="60" step="5" aria-label="Minutes before or after sunset">
+        <div class="range-ends muted small"><span>1 hr before</span><span>sunset</span><span>1 hr after</span></div>
+      </div>
+      <div id="on-time-row" class="field" hidden>
+        <label class="field-label" for="on-time"><span>Fully on at</span></label>
+        <input id="on-time" type="time">
+      </div>
+      <div class="field">
+        <div class="field-label"><span id="on-fade-label"></span></div>
+        <input id="on-fade" type="range" min="0" max="120" step="5" aria-label="Fade in length">
+        <div class="range-ends muted small"><span>Instantly</span><span>2 hours</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Lights off</h3>
+      <div class="field">
+        <label class="field-label" for="off-time"><span>Start fading at</span></label>
+        <input id="off-time" type="time">
+      </div>
+      <div class="field">
+        <div class="field-label"><span id="off-fade-label"></span></div>
+        <input id="off-fade" type="range" min="0" max="90" step="5" aria-label="Fade out length">
+        <div class="range-ends muted small"><span>Instantly</span><span>90 min</span></div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">What to show</h3>
+      <div id="sched-patterns" class="chip-scroll"></div>
+      <div class="field">
+        <div class="field-label"><span>Brightness when fully on</span><strong id="sched-level-label"></strong></div>
+        <input id="sched-level" type="range" min="10" max="100" step="5" aria-label="Brightness when fully on">
+      </div>
+      <p class="muted small">Uses your current strip order. Motion like Chase starts once the lights are fully on.</p>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Days</h3>
+      <div id="sched-days" class="days">
+        <button data-day="1" aria-label="Monday">M</button><button data-day="2" aria-label="Tuesday">T</button><button data-day="3" aria-label="Wednesday">W</button><button data-day="4" aria-label="Thursday">T</button><button data-day="5" aria-label="Friday">F</button><button data-day="6" aria-label="Saturday">S</button><button data-day="0" aria-label="Sunday">S</button>
+      </div>
+      <label class="inline" style="margin-top:14px"><input id="season-on" type="checkbox"> Only during a season</label>
+      <div id="season-fields" class="season" hidden>
+        <label class="small muted">From <input id="season-from" type="date"></label>
+        <label class="small muted">To <input id="season-to" type="date"></label>
+        <p class="muted small">Repeats every year.</p>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Where’s this house?</h3>
+      <div class="loc-row">
+        <p id="loc-text" class="muted small grow"></p>
+        <button id="loc-btn" class="small">📍 Use my location</button>
+      </div>
+      <p class="muted small">Only the rough area (about 1 km) is saved, just to work out sunset.</p>
+    </div>
+
+    <div class="row maker-extra">
+      <button id="skip-btn" class="small" hidden>⏭ Skip tonight</button>
+      <button id="sched-delete" class="small danger" hidden>Delete schedule</button>
+    </div>
+  </section>
+
   <!-- Houses & family -->
   <dialog id="settings">
     <h2>Houses</h2>
@@ -203,6 +297,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-5"></script>
+  <script src="app.js?v=2026.11.24-6"></script>
 </body>
 </html>
