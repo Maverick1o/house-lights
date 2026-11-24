@@ -252,3 +252,15 @@ h3.first { margin-top: 0; }
 #maker-preview { min-width: 132px; }
 #maker-preview.done { background: #1f3a26; color: #7be495; border-color: #2d5a39; }
 .levels button:disabled { opacity: .35; }
+
+/* ---------- Motion options ---------- */
+.segmented.four { grid-template-columns: repeat(4, 1fr); }
+.segmented.two { grid-template-columns: repeat(2, 1fr); }
+.segmented.three { grid-template-columns: repeat(3, 1fr); }
+.motion-options { display: flex; flex-direction: column; gap: 10px; margin-top: 12px; }
+.opt-row { display: grid; grid-template-columns: 70px 1fr; align-items: center; gap: 8px; }
+.opt-row.column { grid-template-columns: 1fr; }
+.opt-row .segmented button { min-height: 34px; font-size: 13px; }
+#to-swatches .swatch-btn.small { font-size: 10px; color: #ddd; padding: 0; }
+#to-swatches .swatch-btn.active { outline: 3px solid #fff; outline-offset: 2px; }
+#motion-note:empty { display: none; }

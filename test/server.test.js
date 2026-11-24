@@ -321,6 +321,8 @@ test('only the LIFX calls the app needs are forwarded, with selectors intact', a
   assert.equal((await admin.call('PUT', 'lifx/home/lights/states', { states: [{ selector: 'id:d073d5|0-14', color: 'red' }] })).status, 207);
   assert.equal((await admin.call('POST', `lifx/home/lights/${sel}/effects/move`, { period: 2 })).status, 207);
   assert.equal((await admin.call('POST', `lifx/home/lights/${zone}/effects/off`, {})).status, 207);
+  assert.equal((await admin.call('POST', `lifx/home/lights/${sel}/effects/breathe`, { color: 'brightness:0.05', period: 3 })).status, 207);
+  assert.equal((await admin.call('POST', `lifx/home/lights/${sel}/effects/pulse`, { color: 'red', period: 1 })).status, 207);
 
   const before = lifxCalls.length;
   for (const [method, path] of [

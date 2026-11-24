@@ -11,7 +11,7 @@
  */
 'use strict';
 
-const APP_VERSION = '2026.11.24-2';
+const APP_VERSION = '2026.11.24-3';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
@@ -392,13 +392,45 @@ async function sendStates(states, what) {
 }
 
 // Paint cells along a set of strips, then optionally start an effect.
+// Motion: what the lights do after a pattern is painted.
+//   { type: 'none' | 'chase' | 'breathe' | 'pulse', dir, speed, to }
+// Older patterns stored just a string ('chase', 'chase-back', …); both work.
+const SPEEDS = {
+  chase: { slow: 4, medium: 2, fast: 0.8 },     // seconds per step around the strip
+  breathe: { slow: 6, medium: 3, fast: 1.5 },   // seconds per fade in and out
+  pulse: { slow: 2, medium: 1, fast: 0.5 },     // seconds per blink
+};
+const DEFAULT_TO = 'brightness:0.05';
+function normalizeMotion(effect, motion = {}) {
+  if (effect && typeof effect === 'object') return normalizeMotion(effect.type, effect);
+  const type = effect === 'chase' || effect === 'chase-back' ? 'chase' : effect === 'breathe' || effect === 'pulse' ? effect : 'none';
+  return {
+    type,
+    dir: effect === 'chase-back' || motion.dir === 'backward' ? 'backward' : 'forward',
+    speed: ['slow', 'medium', 'fast'].includes(motion.speed) ? motion.speed : 'medium',
+    to: typeof motion.to === 'string' && motion.to.length < 60 ? motion.to : DEFAULT_TO,
+  };
+}
+const legacyEffect = mo => (mo.type === 'chase' ? (mo.dir === 'backward' ? 'chase-back' : 'chase') : mo.type);
+
+function startMotion(selector, mo) {
+  const period = SPEEDS[mo.type]?.[mo.speed];
+  if (mo.type === 'chase') {
+    return api('POST', `/lights/${enc(selector)}/effects/move`, { direction: mo.dir, period, power_on: true });
+  }
+  if (mo.type === 'breathe' || mo.type === 'pulse') {
+    return api('POST', `/lights/${enc(selector)}/effects/${mo.type}`, { color: mo.to, period, cycles: 100000, persist: false, power_on: true });
+  }
+}
+
 async function paint(selector, pos, cells, level, effect = 'none') {
   step('stopping any animation…');
   await effectsOff(selector);
   await sendStates(cellsToStates(pos, cells, level), `painting ${pos.length} lights`);
-  if (effect === 'chase' || effect === 'chase-back') {
-    step('starting chase…');
-    await chase(selector, effect === 'chase' ? 'forward' : 'backward');
+  const mo = normalizeMotion(effect);
+  if (mo.type !== 'none') {
+    step(`starting ${mo.type}…`);
+    await startMotion(selector, mo);
   }
 }
 
@@ -413,14 +445,14 @@ async function paintGroup(g, cells, effect = 'none') {
 
 function applyToGroup(g, pattern) {
   const n = positions(g.lights, g.id).length;
-  return paintGroup(g, patternCells(pattern, g.id, n), pattern.effect || 'none');
+  return paintGroup(g, patternCells(pattern, g.id, n), normalizeMotion(pattern.effect, pattern.motion));
 }
 
 function applyToStrip(g, light, pattern) {
   const pos = positions([light], g.id);
   gp(g.id).last = null; // the group is now mixed
   saveGroupPrefs();
-  return paint(`id:${light.id}`, pos, patternCells(pattern, g.id, pos.length), 1, pattern.effect || 'none');
+  return paint(`id:${light.id}`, pos, patternCells(pattern, g.id, pos.length), 1, normalizeMotion(pattern.effect, pattern.motion));
 }
 
 // Identify strips: each strip a solid colour, its light #1 bright white.
@@ -698,8 +730,8 @@ function makerCells(m = maker) {
   for (const [i, x] of Object.entries(m.overrides)) if (+i < m.n) cells[+i] = { ...x };
   return cells;
 }
-const editState = (m = maker) => JSON.stringify({ seq: m.seq, overrides: m.overrides, effect: m.effect, name: m.name });
-const sendKey = (m = maker) => JSON.stringify({ cells: makerCells(m), effect: m.effect });
+const editState = (m = maker) => JSON.stringify({ seq: m.seq, overrides: m.overrides, motion: m.motion, name: m.name });
+const sendKey = (m = maker) => JSON.stringify({ cells: makerCells(m), motion: m.motion });
 
 // Single-light changes in a saved pattern = where it differs from the repeat.
 function overridesFor(pattern, seq, n) {
@@ -719,7 +751,7 @@ function openMaker(gid, pattern) {
   maker = {
     gid, n, seq,
     overrides: isSaved ? overridesFor(pattern, seq, n) : {},
-    effect: pattern?.effect || 'none',
+    motion: normalizeMotion(pattern?.effect, pattern?.motion),
     name: isSaved ? pattern.name : '',
     editingId: isSaved ? pattern.id : null,
     brush: cell(C.Red),
@@ -737,7 +769,7 @@ function openMaker(gid, pattern) {
 const isDirty = () => !!maker && editState() !== (maker.savedState ?? maker.startState);
 
 function remember() {
-  maker.history.push(JSON.stringify({ seq: maker.seq, overrides: maker.overrides, effect: maker.effect }));
+  maker.history.push(JSON.stringify({ seq: maker.seq, overrides: maker.overrides, motion: maker.motion }));
   if (maker.history.length > 80) maker.history.shift();
 }
 
@@ -769,7 +801,7 @@ function renderMaker() {
   }, `⭐ ${p.name}`)));
   renderSeq();
   renderHouse();
-  document.querySelectorAll('#effect-seg button').forEach(b => b.classList.toggle('active', b.dataset.effect === m.effect));
+  renderMotion();
   $('#maker-share').hidden = !m.editingId;
   $('#maker-delete').hidden = !m.editingId;
   renderHeader();
@@ -786,6 +818,46 @@ function renderHeader() {
   const dirty = isDirty();
   $('#maker-save').textContent = m.editingId && !dirty ? 'Saved ✓' : 'Save';
   $('#maker-save').classList.toggle('primary', dirty);
+}
+
+const FADE_TO = [
+  { name: 'Dim', api: DEFAULT_TO, css: '#3a3226' },
+  { name: 'Off', api: 'brightness:0', css: '#0d0f13' },
+  ...COLORS,
+];
+
+function renderMotion() {
+  const mo = maker.motion;
+  const mark = (sel, attr, value) => document.querySelectorAll(sel).forEach(b => b.classList.toggle('active', b.dataset[attr] === value));
+  mark('#effect-seg button', 'kind', mo.type);
+  $('#motion-options').hidden = mo.type === 'none';
+  $('#dir-row').hidden = mo.type !== 'chase';
+  mark('#dir-seg button', 'dir', mo.dir);
+  mark('#speed-seg button', 'speed', mo.speed);
+  $('#to-row').hidden = mo.type === 'chase';
+  $('#to-label').textContent = mo.type === 'pulse' ? 'Blinks to' : 'Fades to';
+  $('#to-swatches').replaceChildren(...FADE_TO.map(c => el('button', {
+    class: 'swatch-btn small' + (c.name === 'Off' ? ' off-swatch' : '') + (mo.to === c.api ? ' active' : ''),
+    title: c.name, 'aria-label': `${mo.type === 'pulse' ? 'Blink' : 'Fade'} to ${c.name}`,
+    style: c.name === 'Off' ? '' : `background:${c.css}`,
+    onclick: () => setMotion({ to: c.api }),
+  }, c.name === 'Dim' ? 'Dim' : c.name === 'Off' ? 'Off' : null)));
+  $('#motion-note').textContent = {
+    none: '',
+    chase: 'Your pattern travels along the lights.',
+    breathe: 'Try it: on some strips the whole strip fades to one colour while breathing, then your pattern returns when you stop it.',
+    pulse: 'Try it: on some strips the whole strip blinks to one colour, then your pattern returns when you stop it.',
+  }[mo.type];
+}
+
+function setMotion(change) {
+  const next = { ...maker.motion, ...change };
+  if (JSON.stringify(next) === JSON.stringify(maker.motion)) return;
+  remember();
+  maker.motion = next;
+  renderMotion();
+  renderHeader();
+  renderDock();
 }
 
 function renderSeq() {
@@ -876,7 +948,7 @@ function startFrom(q) {
   remember();
   maker.seq = clone(q.seq || q.pattern.loop);
   maker.overrides = q.pattern ? overridesFor(q.pattern, maker.seq, maker.n) : {};
-  if (q.pattern) maker.effect = q.pattern.effect || 'none';
+  if (q.pattern) maker.motion = normalizeMotion(q.pattern.effect, q.pattern.motion);
   renderMaker();
   showActivity(`Started from ${q.name} — tap ↶ to undo`, 'ok');
 }
@@ -926,7 +998,8 @@ function makerPattern() {
     loop: clone(maker.seq),
     overrides: clone(maker.overrides),
     cells: makerCells(),
-    effect: maker.effect,
+    effect: legacyEffect(maker.motion),
+    motion: clone(maker.motion),
   };
 }
 
@@ -947,7 +1020,7 @@ function b64urlDecode(s) {
 async function sharePattern(pt) {
   // Leave out the full list when it's just the loop repeated (much shorter link).
   const plain = JSON.stringify(tile(pt.loop, pt.cells.length)) === JSON.stringify(pt.cells);
-  const data = { n: pt.name, l: pt.loop, ...(plain ? {} : { c: pt.cells }), e: pt.effect };
+  const data = { n: pt.name, l: pt.loop, ...(plain ? {} : { c: pt.cells }), e: pt.effect, m: pt.motion };
   const url = `${location.origin}${location.pathname}#p=${b64urlEncode(JSON.stringify(data))}`;
   try {
     if (navigator.share) await navigator.share({ title: `House Lights pattern: ${pt.name}`, url });
@@ -966,7 +1039,7 @@ function importFromHash() {
     const valid = x => x && typeof x.c === 'string' && x.c.length < 60 && typeof x.b === 'number';
     if (typeof d.n !== 'string' || !Array.isArray(d.l) || !d.l.length || !d.l.every(valid) || (d.c && !d.c.every(valid))) throw 0;
     if (!confirm(`Add the shared pattern “${d.n}” to your patterns?`)) return;
-    saved.push({ id: `p-${Date.now().toString(36)}`, name: d.n.slice(0, 40), loop: d.l, cells: d.c, effect: ['chase', 'chase-back'].includes(d.e) ? d.e : 'none' });
+    saved.push({ id: `p-${Date.now().toString(36)}`, name: d.n.slice(0, 40), loop: d.l, cells: d.c, effect: legacyEffect(normalizeMotion(d.e, d.m || {})), motion: normalizeMotion(d.e, d.m || {}) });
     savePatterns();
     showActivity(`✓ Added “${d.n}” to your patterns`, 'ok');
   } catch {
@@ -1343,21 +1416,16 @@ $('#overrides-reset').addEventListener('click', () => {
   maker.overrides = {};
   afterEdit();
 });
-document.querySelectorAll('#effect-seg button').forEach(b => b.addEventListener('click', () => {
-  if (maker.effect === b.dataset.effect) return;
-  remember();
-  maker.effect = b.dataset.effect;
-  document.querySelectorAll('#effect-seg button').forEach(x => x.classList.toggle('active', x === b));
-  renderHeader();
-  renderDock();
-}));
+document.querySelectorAll('#effect-seg button').forEach(b => b.addEventListener('click', () => setMotion({ type: b.dataset.kind })));
+document.querySelectorAll('#dir-seg button').forEach(b => b.addEventListener('click', () => setMotion({ dir: b.dataset.dir })));
+document.querySelectorAll('#speed-seg button').forEach(b => b.addEventListener('click', () => setMotion({ speed: b.dataset.speed })));
 $('#maker-preview').addEventListener('click', () => {
   const m = maker;
   const g = groupById(m.gid);
   const cells = makerCells(m);
   const key = sendKey(m);
   run(`Show on house · ${g.name}`, async () => {
-    await paintGroup(g, cells, m.effect);
+    await paintGroup(g, cells, m.motion);
     m.sent = key;
   }).then(() => { if (maker === m) renderDock(); });
 });

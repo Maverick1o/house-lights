@@ -12,7 +12,7 @@
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-2">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-3">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -114,10 +114,33 @@
       </div>
       <div id="house-grid"></div>
       <h3>Motion</h3>
-      <div id="effect-seg" class="segmented" role="group" aria-label="Motion">
-        <button data-effect="none">Steady</button>
-        <button data-effect="chase">Chase →</button>
-        <button data-effect="chase-back">← Chase</button>
+      <div id="effect-seg" class="segmented four" role="group" aria-label="Motion">
+        <button data-kind="none">Steady</button>
+        <button data-kind="chase">Chase</button>
+        <button data-kind="breathe">Breathe</button>
+        <button data-kind="pulse">Pulse</button>
+      </div>
+      <div id="motion-options" class="motion-options" hidden>
+        <div id="dir-row" class="opt-row">
+          <span class="muted small">Direction</span>
+          <div id="dir-seg" class="segmented two" role="group" aria-label="Direction">
+            <button data-dir="forward">Forward →</button>
+            <button data-dir="backward">← Backward</button>
+          </div>
+        </div>
+        <div class="opt-row">
+          <span class="muted small">Speed</span>
+          <div id="speed-seg" class="segmented three" role="group" aria-label="Speed">
+            <button data-speed="slow">Slow</button>
+            <button data-speed="medium">Medium</button>
+            <button data-speed="fast">Fast</button>
+          </div>
+        </div>
+        <div id="to-row" class="opt-row column">
+          <span id="to-label" class="muted small">Fades to</span>
+          <div id="to-swatches" class="chips"></div>
+        </div>
+        <p id="motion-note" class="muted small"></p>
       </div>
     </div>
 
@@ -167,6 +190,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-2"></script>
+  <script src="app.js?v=2026.11.24-3"></script>
 </body>
 </html>
