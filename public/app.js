@@ -1,23 +1,18 @@
-/* House Lights — a tiny LIFX controller for one household.
+/* House Lights — LIFX controller for the family's houses.
  *
- * A phone can hold several houses, each with its own LIFX token. Only the
- * current house's token is ever used, and a token can only see the lights on
- * its own LIFX account, so one house can never affect another.
- * Nothing is sent anywhere except api.lifx.com.
+ * The app signs in with a passkey (Face ID) and talks only to its own
+ * backend (/api). The backend holds each house's LIFX token, checks which
+ * houses you may reach, and forwards commands to LIFX. Tokens never reach
+ * the phone, and passkeys live in the phone's keychain, so nothing is lost
+ * when website data is cleared or cookies are blocked.
  *
  * Lights are shown by LIFX group. A group of strips behaves like one
  * continuous string: patterns flow from the first strip into the next.
  */
 'use strict';
 
-const API = 'https://api.lifx.com/v1';
-const APP_VERSION = '2026.11.23-2';
-const TOKEN_KEY = 'houselights.token';      // old single-house storage, kept in sync (see saveHouses)
-const HOUSES_KEY = 'houselights.houses';     // [{ id, name, token, locationId? }]
-const ACTIVE_KEY = 'houselights.active';
-const GROUPS_KEY = 'houselights.groups';     // per-group order, options, last pattern
-const PATTERNS_KEY = 'houselights.patterns'; // saved custom patterns
-const MAX_STATES = 50;                       // LIFX limit per /lights/states request
+const APP_VERSION = '2026.11.24-1';
+const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // ---------- Colours ----------
 
@@ -61,89 +56,103 @@ const IDENT = [
 
 // ---------- State ----------
 
-let houses = loadJSON(HOUSES_KEY, []);
-if (!houses.length && localStorage.getItem(TOKEN_KEY)) {
-  houses = [{ id: newId(), name: 'My house', token: localStorage.getItem(TOKEN_KEY) }];
-  saveHouses();
-}
-let house = houses.find(h => h.id === localStorage.getItem(ACTIVE_KEY)) || houses[0] || null;
+let me = null;            // { id, name, admin } once signed in
+let houses = [];          // [{ key, name }] this person can reach
+let house = null;         // the house being shown
 let demo = false;
-let fixingHouseId = null; // set when re-entering a token for an existing house
-
-function newId() { return Math.random().toString(36).slice(2, 10); }
-function saveHouses() {
-  localStorage.setItem(HOUSES_KEY, JSON.stringify(houses));
-  // Older copies of the app (which iPhones sometimes keep cached) only read
-  // this key. Keeping it set means they still open to your house instead of
-  // the connect screen.
-  if (houses[0]) localStorage.setItem(TOKEN_KEY, houses[0].token);
-  else localStorage.removeItem(TOKEN_KEY);
-}
-if (houses.length) saveHouses();
-
-// Make sure saved houses can actually be stored on this phone.
-function storageWorks() {
-  try {
-    localStorage.setItem('houselights.check', '1');
-    localStorage.removeItem('houselights.check');
-    return true;
-  } catch { return false; }
-}
-// One line describing what this phone has saved, to help track down
-// "it keeps asking me to connect" problems. Never includes token values.
-function diagnostics() {
-  let saved = '?', legacy = '?';
-  try {
-    saved = (JSON.parse(localStorage.getItem(HOUSES_KEY)) || []).length;
-    legacy = localStorage.getItem(TOKEN_KEY) ? 'yes' : 'no';
-  } catch {}
-  const mode = navigator.standalone || matchMedia('(display-mode: standalone)').matches ? 'Home Screen app' : 'Safari tab';
-  return `v${APP_VERSION} · ${mode} · saved houses: ${saved} · old token: ${legacy} · storage: ${storageWorks() ? 'OK' : 'BLOCKED'} · keys: ${Object.keys(localStorage).filter(k => k.startsWith('houselights.')).length}`;
-}
-
-// Ask the browser not to clear our saved data to free up space.
-navigator.storage?.persist?.().catch(() => {});
-// Everything this app sends is limited to the current house.
-function houseSel() { return !demo && house?.locationId ? `location_id:${house.locationId}` : 'all'; }
+let sessionToken = null;  // only used when the phone blocks cookies
 let lights = [];
-let groupPrefs = loadJSON(GROUPS_KEY, {});
-let saved = loadJSON(PATTERNS_KEY, []);
+let groupPrefs = {};      // per-group settings for the current house (synced)
+let saved = [];           // this person's saved patterns (synced)
 let identifySnapshot = null; // { gid, lights: [...] } to restore after Identify
-
-function loadJSON(key, fallback) {
-  try { return JSON.parse(localStorage.getItem(key)) ?? fallback; } catch { return fallback; }
-}
-const saveGroupPrefs = () => localStorage.setItem(GROUPS_KEY, JSON.stringify(groupPrefs));
-const savePatterns = () => localStorage.setItem(PATTERNS_KEY, JSON.stringify(saved));
 
 const $ = sel => document.querySelector(sel);
 
-// ---------- API ----------
+// Best-effort local memory (e.g. last house shown). May be blocked; never required.
+const local = {
+  get(k) { try { return localStorage.getItem(`houselights.${k}`); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(`houselights.${k}`, v); } catch { /* blocked */ } },
+};
 
-async function api(method, path, body) {
-  if (demo) return mockApi(method, path, body);
+// ---------- Settings sync ----------
+// Strip order etc. are saved per house, patterns per person, on the server,
+// so they survive app restarts, blocked cookies and new phones.
+
+const pendingSync = new Map(); // api path -> { prefs, timer }
+
+function syncLater(path, prefs) {
+  if (demo) return;
+  const p = pendingSync.get(path);
+  if (p) clearTimeout(p.timer);
+  pendingSync.set(path, { prefs, timer: setTimeout(() => flushSync(path), 800) });
+}
+
+function flushSync(only) {
+  for (const [path, p] of pendingSync) {
+    if (only && path !== only) continue;
+    clearTimeout(p.timer);
+    pendingSync.delete(path);
+    server('PUT', path, { prefs: p.prefs }, { keepalive: true })
+      .catch(e => showActivity(`Couldn’t save your settings — ${e.message}`, 'err'));
+  }
+}
+
+const saveGroupPrefs = () => house && syncLater(`prefs/house/${house.key}`, { groups: structuredClone(groupPrefs) });
+const savePatterns = () => syncLater('prefs/user', { patterns: structuredClone(saved) });
+
+// ---------- Talking to the backend ----------
+
+const ERRORS = {
+  signed_out: 'You’re signed out.',
+  house_token_invalid: 'This house’s LIFX token isn’t working. It needs updating in Vercel.',
+  no_access: 'You don’t have access to this house.',
+  lifx_unreachable: 'Couldn’t reach LIFX. Try again in a moment.',
+  storage_not_configured: 'The database isn’t connected yet.',
+  too_many_attempts: 'Too many tries. Wait an hour and try again.',
+  wrong_setup_code: 'That setup code isn’t right.',
+  invite_invalid: 'This invite link has expired or was already used. Ask for a new one.',
+  flow_expired: 'That took too long. Please try again.',
+  passkey_not_verified: 'Face ID sign-in couldn’t be verified. Please try again.',
+  unknown_passkey: 'That passkey isn’t registered for House Lights. Ask the family admin for a new invite.',
+  passkey_already_registered: 'This passkey is already set up. Use “Sign in with Face ID” instead.',
+  already_set_up: 'House Lights is already set up. Sign in instead.',
+  setup_code_not_configured: 'Add a SETUP_CODE in Vercel to finish setup.',
+  cannot_remove_yourself: 'You can’t remove yourself.',
+  choose_a_house: 'Choose at least one house.',
+};
+
+async function server(method, path, body, { keepalive = false } = {}) {
   let res;
   try {
-    res = await fetch(API + path, {
+    res = await fetch(`/api/${path}`, {
       method,
+      credentials: 'same-origin',
+      keepalive,
       headers: {
-        Authorization: 'Bearer ' + house.token,
-        ...(body ? { 'Content-Type': 'application/json' } : {}),
+        ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+        ...(sessionToken ? { Authorization: `Bearer ${sessionToken}` } : {}),
       },
-      body: body ? JSON.stringify(body) : undefined,
+      body: body !== undefined ? JSON.stringify(body) : undefined,
     });
   } catch {
-    throw new Error('Could not reach LIFX. Check your internet connection.');
+    throw Object.assign(new Error('Couldn’t connect. Check your internet connection.'), { code: 'offline' });
   }
-  if (res.status === 401) {
-    const err = new Error('LIFX did not accept this token.');
-    err.unauthorized = true;
-    throw err;
+  const data = await res.json().catch(() => null);
+  if (!res.ok) {
+    const code = typeof data?.error === 'string' && ERRORS[data.error] ? data.error : null;
+    const msg = res.status === 429 && !code ? 'Too many changes at once — wait a few seconds and try again.'
+      : code ? ERRORS[code]
+      : typeof data?.error === 'string' ? data.error
+      : `Something went wrong (error ${res.status}).`;
+    throw Object.assign(new Error(msg), { code: data?.error, status: res.status, data });
   }
-  if (res.status === 429) throw new Error('Too many changes at once — wait a few seconds and try again.');
-  const data = res.status === 204 ? null : await res.json().catch(() => null);
-  if (!res.ok) throw new Error((data && (data.error || data.errors?.[0]?.message)) || `LIFX error ${res.status}`);
+  return data;
+}
 
+// LIFX calls go through the backend, which adds this house's token.
+async function api(method, path, body) {
+  if (demo) return mockApi(method, path, body);
+  const data = await server(method, `lifx/${house.key}${path}`, body);
   // 207 Multi-Status: note lights that didn't respond.
   const results = data?.results?.flatMap(r => r.results || [r]) || [];
   for (const f of results.filter(r => r.status && r.status !== 'ok')) {
@@ -157,6 +166,63 @@ const setState = (selector, state) => api('PUT', `/lights/${enc(selector)}/state
 const effectsOff = selector => api('POST', `/lights/${enc(selector)}/effects/off`, {});
 const chase = (selector, direction = 'forward') =>
   api('POST', `/lights/${enc(selector)}/effects/move`, { direction, period: 2, power_on: true });
+
+// ---------- Passkeys (Face ID) ----------
+
+const toBuf = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), ch => ch.charCodeAt(0)).buffer;
+const toB64u = buf => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function createPasskey(o) {
+  const cred = await navigator.credentials.create({
+    publicKey: {
+      ...o,
+      challenge: toBuf(o.challenge),
+      user: { ...o.user, id: toBuf(o.user.id) },
+      excludeCredentials: (o.excludeCredentials || []).map(c => ({ ...c, id: toBuf(c.id) })),
+    },
+  });
+  return {
+    id: cred.id,
+    rawId: toB64u(cred.rawId),
+    type: cred.type,
+    response: {
+      clientDataJSON: toB64u(cred.response.clientDataJSON),
+      attestationObject: toB64u(cred.response.attestationObject),
+      transports: cred.response.getTransports?.() || [],
+    },
+    clientExtensionResults: cred.getClientExtensionResults?.() || {},
+    authenticatorAttachment: cred.authenticatorAttachment || undefined,
+  };
+}
+
+async function getPasskey(o) {
+  const cred = await navigator.credentials.get({
+    publicKey: {
+      ...o,
+      challenge: toBuf(o.challenge),
+      allowCredentials: (o.allowCredentials || []).map(c => ({ ...c, id: toBuf(c.id) })),
+    },
+  });
+  return {
+    id: cred.id,
+    rawId: toB64u(cred.rawId),
+    type: cred.type,
+    response: {
+      clientDataJSON: toB64u(cred.response.clientDataJSON),
+      authenticatorData: toB64u(cred.response.authenticatorData),
+      signature: toB64u(cred.response.signature),
+      userHandle: cred.response.userHandle ? toB64u(cred.response.userHandle) : undefined,
+    },
+    clientExtensionResults: cred.getClientExtensionResults?.() || {},
+    authenticatorAttachment: cred.authenticatorAttachment || undefined,
+  };
+}
+
+function passkeyMessage(e) {
+  if (e?.name === 'NotAllowedError') return 'Face ID was cancelled or timed out. Tap to try again.';
+  if (e?.name === 'InvalidStateError') return 'This phone already has a House Lights passkey. Use “Sign in with Face ID”.';
+  return e?.message || 'Something went wrong. Please try again.';
+}
 
 // ---------- Activity bar ----------
 
@@ -781,11 +847,11 @@ function importFromHash() {
 // ---------- Screens and loading ----------
 
 function show(screen) {
-  for (const s of ['setup', 'main', 'maker']) $(`#${s}`).hidden = screen !== s;
+  for (const s of ['auth', 'main', 'maker']) $(`#${s}`).hidden = screen !== s;
 }
 
 async function loadLights() {
-  lights = await api('GET', `/lights/${enc(houseSel())}`);
+  lights = await api('GET', '/lights/all');
   if (!maker) renderMain();
 }
 
@@ -804,164 +870,322 @@ async function refresh(label = 'Refreshing lights') {
 }
 
 function handleError(e, label) {
-  if (e.unauthorized && house) {
+  if (e.code === 'signed_out' && !demo) {
     $('#activity').hidden = true;
-    openSetup(house);
-    showSetupError(`The saved token for “${house.name}” no longer works. Please paste a new one.`);
+    signedOut();
     return;
   }
   showActivity(`${label ? `${label} — ` : ''}${e.message}`, 'err');
 }
 
-function showSetupError(msg) {
-  const p = $('#setup-error');
-  p.textContent = msg;
-  p.hidden = !msg;
+// ---------- Signing in ----------
+
+const inviteFromLink = () => (location.hash.match(/^#invite=([\w-]{20,64})$/) || [])[1] || null;
+let prepared = null; // { kind, flowId, options, at } — fetched before the tap so Face ID opens instantly
+let refreshLoginTimer = null;
+
+function showAuth(panel, text = '') {
+  clearInterval(refreshLoginTimer);
+  show('auth');
+  for (const p of ['signin', 'setup', 'join', 'notready']) $(`#auth-${p}`).hidden = p !== panel;
+  $('#notready-text').textContent = text;
+  authError('');
+  $('#auth-version').textContent = `App version ${APP_VERSION}`;
+  if (panel === 'signin') {
+    prepareLogin();
+    refreshLoginTimer = setInterval(prepareLogin, 4 * 60 * 1000); // options expire after 5 minutes
+  }
+  if (panel === 'setup' || panel === 'join') {
+    prepared = null;
+    $(`#${panel}-continue`).hidden = false;
+    $(`#${panel}-create`).hidden = true;
+  }
 }
 
-async function start() {
-  show('main');
-  $('#status').textContent = '';
-  await refresh('Loading your lights');
+function authError(msg) {
+  $('#auth-error').textContent = msg;
+  $('#auth-error').hidden = !msg;
 }
 
-// ---------- Events ----------
-
-// ---------- Houses ----------
-
-function openSetup(fixHouse = null) {
-  fixingHouseId = fixHouse?.id || null;
-  const adding = houses.length > 0 && !fixHouse;
-  $('#setup-title').textContent = fixHouse ? `Reconnect ${fixHouse.name}` : adding ? 'Add a house' : 'House Lights';
-  $('#house-name-input').value = fixHouse?.name || '';
-  $('#token-input').value = '';
-  $('#setup-cancel').hidden = !houses.length;
-  showSetupError('');
-  $('#storage-warning').hidden = storageWorks();
-  $('#diagnostics').textContent = diagnostics();
-  show('setup');
-}
-
-// Ask which LIFX location is this house, when one account has several.
-function chooseLocation(locs) {
-  return new Promise(resolve => {
-    const dlg = $('#loc-dialog');
-    $('#loc-list').replaceChildren(...locs.map(l =>
-      el('button', { onclick: () => { dlg.close(); resolve(l); } }, `${l.name} (${l.count} light${l.count === 1 ? '' : 's'})`)));
-    $('#loc-cancel').onclick = () => { dlg.close(); resolve(null); };
-    dlg.showModal();
-  });
-}
-
-function setActive(h) {
-  house = h;
-  demo = false;
-  localStorage.setItem(ACTIVE_KEY, h.id);
-  lights = [];
-  maker = null;
-  identifySnapshot = null;
-  openKeys.clear();
-  start();
-}
-
-$('#token-form').addEventListener('submit', async e => {
-  e.preventDefault();
-  const value = $('#token-input').value.trim();
-  if (!value) return;
-  const btn = e.target.querySelector('button[type=submit]');
-  btn.disabled = true;
-  showSetupError('');
-  const existing = houses.find(h => h.id === fixingHouseId);
-  const candidate = {
-    id: existing?.id || newId(),
-    name: $('#house-name-input').value.trim().slice(0, 40) || existing?.name || (houses.length ? 'New house' : 'My house'),
-    token: value,
-    ...(existing?.locationId ? { locationId: existing.locationId } : {}),
-  };
-  const prev = { house, demo };
-  house = candidate;
-  demo = false;
+async function prepareLogin() {
   try {
-    const found = await api('GET', '/lights/all'); // validates the token
-    const locs = [...new Map(found.map(l => [l.location?.id, { id: l.location?.id, name: l.location?.name || 'Lights', count: found.filter(x => x.location?.id === l.location?.id).length }])).values()];
-    if (locs.length > 1 && !candidate.locationId) {
-      const pick = await chooseLocation(locs);
-      if (!pick) throw new Error('Choose which location is this house.');
-      candidate.locationId = pick.id;
-      // Another house on this phone with the same account and no location
-      // would see these lights too, so pin it to the other location.
-      for (const h of houses.filter(h => h.token === value && !h.locationId && h.id !== candidate.id)) {
-        const others = locs.filter(l => l.id !== pick.id);
-        if (others.length === 1) h.locationId = others[0].id;
-      }
-    }
-    if (houses.some(h => h.id !== candidate.id && h.token === value && (h.locationId || null) === (candidate.locationId || null))) {
-      throw new Error('That house is already on this phone.');
-    }
-    const i = houses.findIndex(h => h.id === candidate.id);
-    if (i >= 0) houses[i] = candidate; else houses.push(candidate);
-    saveHouses();
-    $('#token-input').value = '';
-    setActive(candidate);
-  } catch (err) {
-    ({ house, demo } = prev);
-    showSetupError(err.unauthorized ? 'That token didn’t work. Check you copied all of it.' : err.message);
+    const o = await server('POST', 'auth/login/options', {});
+    prepared = { kind: 'login', ...o, at: Date.now() };
+  } catch (e) {
+    prepared = null;
+    authError(e.message);
+  }
+}
+
+async function signedOut(info = null) {
+  sessionToken = null;
+  me = null;
+  if (!info) {
+    try { await server('GET', 'me'); } catch (e) { info = e.status === 401 ? e.data : null; }
+  }
+  if (!info) return showAuth('notready', 'Couldn’t reach House Lights. Check your connection and try again.');
+  if (!window.PublicKeyCredential) return showAuth('notready', 'This browser doesn’t support passkeys. Please update your iPhone or open the app in Safari.');
+  if (info.storageConfigured === false) return showAuth('notready', 'Almost ready: the database (Upstash Redis) isn’t connected to this Vercel project yet.');
+  if (!info.housesConfigured) return showAuth('notready', 'Almost ready: no houses yet. Add a LIFX_TOKEN_… environment variable in Vercel, then redeploy.');
+  if (inviteFromLink()) return showAuth('join');
+  if (info.setupNeeded) {
+    return info.setupCodeConfigured ? showAuth('setup')
+      : showAuth('notready', 'Almost ready: add a SETUP_CODE environment variable in Vercel, then redeploy.');
+  }
+  showAuth('signin');
+}
+
+async function afterSignIn(result) {
+  sessionToken = result.sessionToken;
+  if (inviteFromLink()) history.replaceState(null, '', location.pathname);
+  await boot();
+}
+
+$('#signin-btn').addEventListener('click', async () => {
+  const btn = $('#signin-btn');
+  authError('');
+  if (!prepared || prepared.kind !== 'login' || Date.now() - prepared.at > 4.5 * 60 * 1000) await prepareLogin();
+  if (!prepared) return;
+  const { flowId, options } = prepared;
+  prepared = null;
+  btn.disabled = true;
+  try {
+    const response = await getPasskey(options);
+    await afterSignIn(await server('POST', 'auth/login/verify', { flowId, response }));
+  } catch (e) {
+    authError(e.status ? e.message : passkeyMessage(e));
+    prepareLogin();
   } finally {
     btn.disabled = false;
   }
 });
 
-$('#setup-cancel').addEventListener('click', () => { fixingHouseId = null; show('main'); });
+// Setup and joining are two taps: "Continue" checks details with the server,
+// then "Create passkey" opens Face ID straight away (iPhones require that the
+// passkey prompt comes directly from a tap).
+async function continueRegistration(kind) {
+  authError('');
+  const name = $(`#${kind}-name`).value.trim();
+  if (!name) { authError('Please enter your name.'); return; }
+  const btn = $(`#${kind}-continue`);
+  btn.disabled = true;
+  try {
+    const o = kind === 'setup'
+      ? await server('POST', 'auth/setup/options', { name, code: $('#setup-code').value })
+      : await server('POST', 'auth/invite/options', { name, invite: inviteFromLink() });
+    prepared = { kind, ...o, at: Date.now() };
+    btn.hidden = true;
+    $(`#${kind}-create`).hidden = false;
+  } catch (e) {
+    authError(e.message);
+  } finally {
+    btn.disabled = false;
+  }
+}
 
-$('#demo-btn').addEventListener('click', () => { demo = true; start(); });
+async function createRegistration(kind) {
+  if (!prepared || prepared.kind !== kind) return showAuth(kind);
+  const { flowId, options } = prepared;
+  prepared = null;
+  const btn = $(`#${kind}-create`);
+  btn.disabled = true;
+  try {
+    const response = await createPasskey(options);
+    await afterSignIn(await server('POST', 'auth/register/verify', { flowId, response }));
+  } catch (e) {
+    authError(e.status ? e.message : passkeyMessage(e));
+    $(`#${kind}-continue`).hidden = false;
+    btn.hidden = true;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+$('#setup-continue').addEventListener('click', () => continueRegistration('setup'));
+$('#join-continue').addEventListener('click', () => continueRegistration('join'));
+$('#setup-create').addEventListener('click', () => createRegistration('setup'));
+$('#join-create').addEventListener('click', () => createRegistration('join'));
+$('#notready-retry').addEventListener('click', () => boot());
+
+// ---------- Houses ----------
+
+async function boot() {
+  demo = false;
+  let data;
+  try {
+    data = await server('GET', 'me');
+  } catch (e) {
+    if (e.status === 401) return signedOut(e.data);
+    return showAuth('notready', `Couldn’t reach House Lights. ${e.message}`);
+  }
+  me = data.user;
+  houses = data.houses;
+  try {
+    const p = await server('GET', 'prefs/user');
+    saved = Array.isArray(p.prefs.patterns) ? p.prefs.patterns : [];
+  } catch { saved = []; }
+  if (!houses.length) {
+    return showAuth('notready', me.admin
+      ? 'No houses are set up yet. Add a LIFX_TOKEN_… environment variable in Vercel, then redeploy.'
+      : 'You don’t have access to any houses yet. Ask the family admin.');
+  }
+  const last = local.get('active');
+  await setActive(houses.find(h => h.key === last) || houses[0]);
+  importFromHash();
+}
+
+async function setActive(h) {
+  flushSync();
+  house = h;
+  demo = false;
+  local.set('active', h.key);
+  lights = [];
+  maker = null;
+  identifySnapshot = null;
+  openKeys.clear();
+  groupPrefs = {};
+  show('main');
+  $('#status').textContent = '';
+  $('#house-name').textContent = h.name;
+  $('#groups').replaceChildren();
+  try {
+    const p = await server('GET', `prefs/house/${h.key}`);
+    if (house !== h) return; // switched again meanwhile
+    groupPrefs = p.prefs.groups || {};
+  } catch (e) {
+    if (e.code === 'signed_out') return signedOut();
+  }
+  await refresh('Loading your lights');
+}
+
+$('#demo-btn').addEventListener('click', () => {
+  clearInterval(refreshLoginTimer);
+  demo = true;
+  house = null;
+  groupPrefs = {};
+  saved = [];
+  show('main');
+  refresh('Loading demo lights');
+});
 
 document.querySelectorAll('[data-all]').forEach(b =>
-  b.addEventListener('click', () => run(`Everything ${b.dataset.all}`, () => setState(houseSel(), { power: b.dataset.all }))));
+  b.addEventListener('click', () => run(`Everything ${b.dataset.all}`, () => setState('all', { power: b.dataset.all }))));
+
+// ---------- Houses & family sheet ----------
 
 function openHouses() {
-  $('#house-list').replaceChildren(...houses.map(h =>
-    el('button', {
-      class: 'house-item' + (!demo && h.id === house?.id ? ' current' : ''),
-      onclick: () => {
-        if (activity.busy) { showActivity(`Still working on “${activity.busy}” — switch houses when it’s done`); return; }
-        $('#settings').close();
-        if (demo || h.id !== house?.id) setActive(h);
-      },
-    }, el('span', { text: h.name }), !demo && h.id === house?.id ? el('span', { class: 'muted small', text: '✓ showing' }) : null)));
+  $('#house-list').replaceChildren(...(demo ? [] : houses).map(h =>
+    el('div', { class: 'house-row' },
+      el('button', {
+        class: 'house-item' + (h.key === house?.key ? ' current' : ''),
+        onclick: () => {
+          if (activity.busy) { showActivity(`Still working on “${activity.busy}” — switch houses when it’s done`); return; }
+          $('#settings').close();
+          if (h.key !== house?.key) setActive(h);
+        },
+      }, el('span', { text: h.name }), h.key === house?.key ? el('span', { class: 'muted small', text: '✓ showing' }) : null),
+      me?.admin && el('button', { class: 'small', 'aria-label': `Rename ${h.name}`, onclick: () => renameHouse(h) }, 'Rename'))));
   $('#settings-info').textContent = demo
     ? 'You are in demo mode. No real lights are being changed.'
-    : `“${house?.name}” · token ends in …${(house?.token || '').slice(-4)}`;
-  $('#this-house').hidden = demo || !house;
+    : `Signed in as ${me?.name}${me?.admin ? ' (family admin)' : ''}.`;
   $('#leave-demo').hidden = !demo;
+  $('#signout-btn').hidden = demo;
+  $('#refresh-btn').hidden = false;
+  $('#family-section').hidden = demo || !me?.admin;
+  $('#invite-form').hidden = true;
+  $('#invite-result').hidden = true;
   $('#app-version').textContent = `App version ${APP_VERSION}`;
   $('#settings').showModal();
+  if (!demo && me?.admin) loadFamily();
 }
+
+async function renameHouse(h) {
+  const name = prompt('House name', h.name)?.trim();
+  if (!name || name === h.name) return;
+  try {
+    await server('PUT', `houses/${h.key}`, { name });
+    h.name = name.slice(0, 40);
+    if (house?.key === h.key) $('#house-name').textContent = h.name;
+    openHouses();
+  } catch (e) { alert(e.message); }
+}
+
+async function loadFamily() {
+  const list = $('#family-list');
+  list.replaceChildren(el('p', { class: 'muted small', text: 'Loading…' }));
+  try {
+    const f = await server('GET', 'family');
+    const names = Object.fromEntries(f.houses.map(h => [h.key, h.name]));
+    const which = keys => (keys ? keys.map(k => names[k] || k).join(', ') : 'all houses');
+    list.replaceChildren(
+      ...f.users.map(u => el('div', { class: 'person' },
+        el('div', { class: 'grow' },
+          el('strong', { text: u.id === me.id ? `${u.name} (you)` : u.name }),
+          el('div', { class: 'muted small', text: `${u.admin ? 'Admin · ' : ''}${which(u.houses)}` })),
+        u.id !== me.id && el('button', { class: 'small danger', onclick: () => removePerson(u) }, 'Remove'))),
+      ...f.invites.map(i => el('div', { class: 'person' },
+        el('div', { class: 'grow' },
+          el('strong', { text: `Invite: ${i.label}` }),
+          el('div', { class: 'muted small', text: `${which(i.houses)} · not used yet · expires ${new Date(i.expires).toLocaleDateString()}` })),
+        el('button', { class: 'small', onclick: () => cancelInvite(i) }, 'Cancel'))));
+    $('#invite-houses').replaceChildren(...f.houses.map(h =>
+      el('label', { class: 'inline' }, el('input', { type: 'checkbox', value: h.key }), h.name)));
+  } catch (e) {
+    list.replaceChildren(el('p', { class: 'error small', text: e.message }));
+  }
+}
+
+async function removePerson(u) {
+  if (!confirm(`Remove ${u.name}? They’ll be signed out and their passkey will stop working.`)) return;
+  try { await server('DELETE', `family/users/${u.id}`); loadFamily(); } catch (e) { alert(e.message); }
+}
+
+async function cancelInvite(i) {
+  try { await server('DELETE', `family/invites/${i.id}`); loadFamily(); } catch (e) { alert(e.message); }
+}
+
+$('#invite-btn').addEventListener('click', () => {
+  $('#invite-form').hidden = false;
+  $('#invite-result').hidden = true;
+  $('#invite-name').value = '';
+  $('#invite-houses').querySelectorAll('input').forEach(i => (i.checked = false));
+});
+
+$('#invite-create').addEventListener('click', async () => {
+  const label = $('#invite-name').value.trim();
+  const chosen = [...$('#invite-houses').querySelectorAll('input:checked')].map(i => i.value);
+  if (!label) return alert('Who is this invite for?');
+  if (!chosen.length) return alert(ERRORS.choose_a_house);
+  try {
+    const inv = await server('POST', 'family/invites', { label, houses: chosen });
+    $('#invite-link').value = `${location.origin}/#invite=${inv.code}`;
+    $('#invite-form').hidden = true;
+    $('#invite-result').hidden = false;
+    loadFamily();
+  } catch (e) { alert(e.message); }
+});
+
+$('#invite-share').addEventListener('click', async () => {
+  const url = $('#invite-link').value;
+  try {
+    if (navigator.share) await navigator.share({ title: 'Join House Lights', text: 'Tap to set up House Lights with Face ID:', url });
+    else { await navigator.clipboard.writeText(url); showActivity('✓ Invite link copied', 'ok'); }
+  } catch (e) {
+    if (e.name !== 'AbortError') { $('#invite-link').select(); }
+  }
+});
+
 $('#settings-btn').addEventListener('click', openHouses);
 $('#house-switch').addEventListener('click', openHouses);
 $('#close-settings').addEventListener('click', () => $('#settings').close());
-$('#add-house-btn').addEventListener('click', () => { $('#settings').close(); openSetup(); });
 $('#refresh-btn').addEventListener('click', () => { $('#settings').close(); refresh(); });
-$('#rename-btn').addEventListener('click', () => {
-  const name = prompt('House name', house.name)?.trim();
-  if (!name) return;
-  house.name = name.slice(0, 40);
-  saveHouses();
+$('#leave-demo').addEventListener('click', () => { $('#settings').close(); boot(); });
+$('#signout-btn').addEventListener('click', async () => {
+  if (!confirm('Sign out of House Lights on this phone?')) return;
+  flushSync();
   $('#settings').close();
-  renderMain();
-});
-$('#leave-demo').addEventListener('click', () => {
-  $('#settings').close();
-  demo = false;
-  lights = [];
-  if (house) setActive(house); else openSetup();
-});
-$('#logout-btn').addEventListener('click', () => {
-  if (!confirm(`Remove “${house.name}” from this phone? Its lights won’t be changed.`)) return;
-  houses = houses.filter(h => h.id !== house.id);
-  saveHouses();
-  $('#settings').close();
-  if (houses.length) setActive(houses[0]);
-  else { house = null; lights = []; localStorage.removeItem(ACTIVE_KEY); openSetup(); }
+  try { await server('POST', 'auth/logout', {}); } catch { /* signing out anyway */ }
+  signedOut();
 });
 
 // Pattern maker controls
@@ -1012,7 +1236,7 @@ $('#maker-save').addEventListener('click', () => {
 $('#maker-share').addEventListener('click', () => sharePattern(makerPattern()));
 $('#maker-delete').addEventListener('click', () => {
   const pt = saved.find(p => p.id === maker.editingId);
-  if (!pt || !confirm(`Delete the pattern “${pt.name}” from this phone?`)) return;
+  if (!pt || !confirm(`Delete the pattern “${pt.name}”?`)) return;
   saved = saved.filter(p => p.id !== pt.id);
   savePatterns();
   showActivity(`Deleted “${pt.name}”`, 'ok');
@@ -1020,8 +1244,10 @@ $('#maker-delete').addEventListener('click', () => {
 });
 
 document.addEventListener('visibilitychange', () => {
-  if (!document.hidden && (house || demo) && !$('#main').hidden) refresh('Checking for changes');
+  if (document.hidden) { flushSync(); return; }
+  if ((house || demo) && !$('#main').hidden) refresh('Checking for changes');
 });
+window.addEventListener('pagehide', () => flushSync());
 
 // ---------- Demo mode (fake lights, no network) ----------
 
@@ -1082,5 +1308,4 @@ async function mockApi(method, path, body) {
 
 // ---------- Boot ----------
 
-importFromHash();
-if (house) start(); else openSetup();
+boot();

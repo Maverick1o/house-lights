@@ -189,3 +189,16 @@ body.busy #maker .maker-dock #maker-preview, body.busy #maker #maker-save { poin
 .house-item.current { border-color: var(--accent); }
 #this-house h3 { margin-top: 18px; }
 #token-form input[type=text] { width: 100%; }
+
+/* ---------- Sign in & family ---------- */
+.auth-panel { display: flex; flex-direction: column; gap: 10px; margin: 16px 0; }
+.auth-panel input { width: 100%; }
+.house-row { display: flex; gap: 8px; align-items: center; }
+.house-row .house-item { flex: 1; }
+.family-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.person { display: flex; align-items: center; gap: 10px; background: #151820; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.person .small.danger, .person button.small { width: auto; margin-top: 0; }
+.invite-box { display: flex; flex-direction: column; gap: 8px; margin-top: 10px; background: #151820; border: 1px solid var(--line); border-radius: 12px; padding: 12px; }
+.invite-box input[type=text] { width: 100%; }
+.invite-houses { display: flex; flex-direction: column; gap: 6px; }
+dialog .house-row button.small { width: auto; margin-top: 0; }

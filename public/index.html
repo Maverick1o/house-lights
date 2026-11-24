@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>House Lights</title>
+  <meta name="theme-color" content="#111318">
+  <meta http-equiv="Cache-Control" content="no-cache">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="House Lights">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-1">
+</head>
+<body>
+  <!-- Activity bar: what the app is doing right now -->
+  <div id="activity" role="status" aria-live="polite" hidden>
+    <span class="spinner" aria-hidden="true"></span>
+    <span id="activity-text"></span>
+  </div>
+
+  <!-- Sign in / set up / join -->
+  <section id="auth" class="screen" hidden>
+    <h1>House Lights</h1>
+
+    <div id="auth-signin" class="auth-panel" hidden>
+      <p class="muted">Sign in with Face ID to control your lights.</p>
+      <button id="signin-btn" class="primary wide">Sign in with Face ID</button>
+    </div>
+
+    <div id="auth-setup" class="auth-panel" hidden>
+      <p class="muted">Welcome! You’re setting up House Lights for the family. You’ll be the admin, and your iPhone will sign you in with Face ID. The setup code is the <strong>SETUP_CODE</strong> you added in Vercel.</p>
+      <input id="setup-name" type="text" maxlength="40" autocomplete="name" placeholder="Your name">
+      <input id="setup-code" type="password" autocomplete="off" placeholder="Setup code">
+      <button id="setup-continue" class="primary wide">Continue</button>
+      <button id="setup-create" class="primary wide" hidden>Create passkey with Face ID</button>
+    </div>
+
+    <div id="auth-join" class="auth-panel" hidden>
+      <p class="muted">You’ve been invited to House Lights. Enter your name, then your iPhone will set up Face ID sign-in. No passwords or tokens needed.</p>
+      <input id="join-name" type="text" maxlength="40" autocomplete="name" placeholder="Your name">
+      <button id="join-continue" class="primary wide">Continue</button>
+      <button id="join-create" class="primary wide" hidden>Create passkey with Face ID</button>
+    </div>
+
+    <div id="auth-notready" class="auth-panel" hidden>
+      <p id="notready-text" class="muted"></p>
+      <button id="notready-retry" class="wide">Check again</button>
+    </div>
+
+    <p id="auth-error" class="error" hidden></p>
+    <button id="demo-btn" class="link">Try demo mode (no lights needed)</button>
+    <p id="auth-version" class="muted small" style="margin-top:24px; opacity:.7"></p>
+  </section>
+
+  <!-- Main screen -->
+  <section id="main" class="screen" hidden>
+    <header class="topbar">
+      <div>
+        <button id="house-switch" class="house-switch" aria-label="Switch house"><h1 id="house-name">My House</h1><span class="caret">▾</span></button>
+        <p id="status" class="muted small"></p>
+      </div>
+      <button id="settings-btn" class="icon" aria-label="Settings">⚙︎</button>
+    </header>
+
+    <div id="groups"></div>
+    <p id="empty" class="muted" hidden>No lights found on this account.</p>
+
+    <div class="row everything">
+      <button data-all="on">Everything on</button>
+      <button data-all="off">Everything off</button>
+    </div>
+  </section>
+
+  <!-- Pattern maker -->
+  <section id="maker" class="screen" hidden>
+    <header class="topbar">
+      <button id="maker-back" class="link">‹ Back</button>
+      <div class="grow center">
+        <h1 class="h-small">Pattern maker</h1>
+        <p id="maker-title" class="muted small"></p>
+      </div>
+      <button id="maker-save" class="small">💾 Save</button>
+    </header>
+
+    <div class="card">
+      <input id="maker-name" type="text" maxlength="40" placeholder="Pattern name (e.g. Candy Cane)">
+      <select id="maker-start" style="margin-top:10px; width:100%"></select>
+      <div class="row" style="margin-top:10px">
+        <button id="maker-share" class="small" hidden>📤 Share with family</button>
+        <button id="maker-delete" class="small danger" hidden>Delete</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="loop-head">
+        <h3 style="margin:0">Loop</h3>
+        <div class="stepper">
+          <button id="loop-minus" class="small" aria-label="Shorter loop">−</button>
+          <span><span id="loop-len">2</span> lights</span>
+          <button id="loop-plus" class="small" aria-label="Longer loop">+</button>
+        </div>
+      </div>
+      <p class="muted small">Pick a colour and brightness in the bar at the bottom, then tap or drag across lights to paint them. Build the first few lights, then repeat them across the whole string.</p>
+      <div id="loop-grid" class="grid loop" data-kind="loop"></div>
+      <button id="repeat-btn" class="primary wide"></button>
+    </div>
+
+    <div class="card">
+      <h3 style="margin-top:0">Whole string</h3>
+      <p class="muted small">Every light, in order around the house. Tap any light to change just that one.</p>
+      <div id="full-grid"></div>
+      <label class="inline" style="margin-top:12px">Effect
+        <select id="maker-effect">
+          <option value="none">None (steady)</option>
+          <option value="chase">Chase forward</option>
+          <option value="chase-back">Chase backward</option>
+        </select>
+      </label>
+    </div>
+
+    <!-- Paint dock: always visible while painting -->
+    <div class="maker-dock">
+      <div id="brush-colors" class="dock-swatches"></div>
+      <div class="dock-row">
+        <div id="brush-levels" class="levels"></div>
+        <button id="maker-preview" class="primary">💡 Preview</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Houses & family -->
+  <dialog id="settings">
+    <h2>Houses</h2>
+    <div id="house-list" class="house-list"></div>
+
+    <div id="family-section" hidden>
+      <h3>Family</h3>
+      <div id="family-list" class="family-list"></div>
+      <button id="invite-btn">+ Invite someone</button>
+      <div id="invite-form" class="invite-box" hidden>
+        <input id="invite-name" type="text" maxlength="40" placeholder="Who is it for? (e.g. Mom)">
+        <p class="muted small">Which houses can they control?</p>
+        <div id="invite-houses" class="invite-houses"></div>
+        <button id="invite-create" class="primary">Create invite link</button>
+      </div>
+      <div id="invite-result" class="invite-box" hidden>
+        <p class="small">Send this link to them. It works once and expires in 7 days.</p>
+        <input id="invite-link" type="text" readonly>
+        <button id="invite-share" class="primary">Share invite</button>
+      </div>
+    </div>
+
+    <p class="muted small" id="settings-info" style="margin-top:16px"></p>
+    <button id="refresh-btn">Refresh lights</button>
+    <button id="signout-btn">Sign out</button>
+    <button id="leave-demo" hidden>Leave demo mode</button>
+    <button id="close-settings" class="primary">Done</button>
+    <p id="app-version" class="muted small center" style="margin-top:10px"></p>
+  </dialog>
+
+
+  <script src="app.js?v=2026.11.24-1"></script>
+</body>
+</html>
