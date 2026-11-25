@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-20">
+  <meta name="app-version" content="2026.11.24-21">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-20">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-21">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -501,9 +501,11 @@
       <div id="family-list" class="family-list"></div>
       <button id="invite-btn">+ Invite someone</button>
       <div id="invite-form" class="invite-box" hidden>
-        <input id="invite-name" type="text" maxlength="40" placeholder="Who is it for? (e.g. Mom)">
-        <p class="muted small">Which houses can they control?</p>
+        <label class="field-label" for="invite-name"><strong>Who is it for?</strong></label>
+        <input id="invite-name" type="text" maxlength="40" placeholder="Their name, e.g. Dad" autocomplete="off" enterkeyhint="next">
+        <label class="field-label"><strong>Which houses can they control?</strong></label>
         <div id="invite-houses" class="invite-houses"></div>
+        <p id="invite-error" class="error small" role="alert" hidden></p>
         <button id="invite-create" class="primary">Create invite link</button>
       </div>
       <div id="invite-result" class="invite-box" hidden>
@@ -522,6 +524,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-20"></script>
+  <script src="app.js?v=2026.11.24-21"></script>
 </body>
 </html>

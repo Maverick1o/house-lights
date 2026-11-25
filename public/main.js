@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequests, motionCells, MOTIONS, isTravel, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-20';
-import * as P from './shared/patterns.js?v=2026.11.24-20';
-import * as core from './shared/schedule-core.js?v=2026.11.24-20';
+} from './shared/patterns.js?v=2026.11.24-21';
+import * as P from './shared/patterns.js?v=2026.11.24-21';
+import * as core from './shared/schedule-core.js?v=2026.11.24-21';
 
-const APP_VERSION = '2026.11.24-20';
+const APP_VERSION = '2026.11.24-21';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -2855,15 +2855,27 @@ async function cancelInvite(i) {
 $('#invite-btn').addEventListener('click', () => {
   $('#invite-form').hidden = false;
   $('#invite-result').hidden = true;
+  $('#invite-error').hidden = true;
   $('#invite-name').value = '';
   $('#invite-houses').querySelectorAll('input').forEach(i => (i.checked = false));
+  $('#invite-form').scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+  $('#invite-name').focus();
 });
+
+// Say what's missing right in the form, next to the thing to fix.
+function inviteProblem(text, field) {
+  $('#invite-error').textContent = text;
+  $('#invite-error').hidden = false;
+  field?.focus();
+}
+$('#invite-name').addEventListener('input', () => { $('#invite-error').hidden = true; });
+$('#invite-houses').addEventListener('change', () => { $('#invite-error').hidden = true; });
 
 $('#invite-create').addEventListener('click', async () => {
   const label = $('#invite-name').value.trim();
   const chosen = [...$('#invite-houses').querySelectorAll('input:checked')].map(i => i.value);
-  if (!label) return alert('Who is this invite for?');
-  if (!chosen.length) return alert(ERRORS.choose_a_house);
+  if (!label) return inviteProblem('Type their name first, e.g. Dad.', $('#invite-name'));
+  if (!chosen.length) return inviteProblem('Tick at least one house they can control.', $('#invite-houses input'));
   try {
     const inv = await server('POST', 'family/invites', { label, houses: chosen });
     $('#invite-link').value = `${location.origin}/#invite=${inv.code}`;

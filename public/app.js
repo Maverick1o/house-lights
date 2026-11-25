@@ -7,7 +7,7 @@
  * reload instead of a blank screen.
  */
 (function () {
-  var version = '2026.11.24-20';
+  var version = '2026.11.24-21';
 
   // The page says which version it belongs to. If it's an older copy, fetch
   // the current page once (the ?fresh= also skips any cached copy).
