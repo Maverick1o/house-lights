@@ -646,3 +646,66 @@ test('timer health is admin-only and reports schedules per house', async () => {
   assert.match(t.body.expected, /\/api\/cron\/tick$/);
 });
 
+// ---------- house library ----------
+
+const timing = (extra = {}) => ({
+  name: 'Evening', on: { mode: 'sunset', offsetMin: 0, time: '17:00', fadeMin: 60 }, off: { time: '23:00', fadeMin: 30 },
+  days: [0, 1, 2, 3, 4, 5, 6], season: null, ...extra,
+});
+
+test('a house library is shared by everyone who can reach the house, and only them', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  const { person } = await invitePerson(app, admin, ['home']);
+  const { person: other } = await invitePerson(app, admin, ['mom_and_dad'], 'Dad');
+  assert.equal((await admin.call('PUT', 'prefs/library/home', { prefs: { patterns: [{ id: 'p-1', name: 'Candy' }] } })).status, 200);
+  assert.deepEqual((await person.call('GET', 'prefs/library/home')).body.prefs.patterns.map(p => p.name), ['Candy']);
+  assert.equal((await other.call('GET', 'prefs/library/home')).status, 403);
+});
+
+test('editing a library schedule updates every group using it; deleting removes it from them', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  assert.equal((await admin.call('PUT', 'timings/home/tevening1', { timing: timing() })).status, 200);
+  assert.equal((await admin.call('PUT', 'timings/home/tevening1', { timing: timing({ days: [] }) })).status, 400);
+  const a = await admin.call('PUT', 'schedules/home/sholiday1', { schedule: schedule({ timingId: 'tevening1', off: { time: '01:00', fadeMin: 5 } }) });
+  assert.equal(a.status, 200);
+  assert.equal(a.body.schedule.off.time, '23:00', 'times come from the library, not the phone');
+  await admin.call('PUT', 'schedules/home/soffice01', { schedule: schedule({ groupId: 'g-office', timingId: 'tevening1' }) });
+  assert.equal((await admin.call('PUT', 'schedules/home/sbroken1', { schedule: schedule({ timingId: 'tmissing' }) })).status, 400);
+
+  const edit = await admin.call('PUT', 'timings/home/tevening1', { timing: timing({ off: { time: '22:30', fadeMin: 20 } }) });
+  assert.equal(edit.body.schedules.length, 2);
+  const list = await admin.call('GET', 'schedules/home');
+  assert.deepEqual(list.body.schedules.map(s => s.off.time), ['22:30', '22:30']);
+  assert.deepEqual(list.body.timings.map(t => t.name), ['Evening']);
+
+  const del = await admin.call('DELETE', 'timings/home/tevening1');
+  assert.deepEqual(del.body.removed.sort(), ['sholiday1', 'soffice01']);
+  assert.equal((await admin.call('GET', 'schedules/home')).body.schedules.length, 0);
+});
+
+test('schedules from before the library become a library schedule their group uses', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule() });
+  const first = await admin.call('GET', 'schedules/home');
+  assert.equal(first.body.timings.length, 1);
+  assert.equal(first.body.timings[0].name, 'Evening');
+  assert.equal(first.body.schedules[0].timingId, first.body.timings[0].id);
+  assert.equal(first.body.timings[0].off.time, '23:00');
+  assert.equal((await admin.call('GET', 'schedules/home')).body.timings.length, 1, 'only once');
+});
+
+test('a schedule can show a pattern from the house library', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  await admin.call('PUT', 'prefs/library/home', { prefs: { patterns: [{ id: 'p-house', name: 'House blue', loop: [{ c: 'hue:225 saturation:1', b: 1 }] }] } });
+  await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...schedule().pattern, source: 'saved', id: 'p-house', name: 'House blue' } }) });
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  setClock(plan.fadeInStart.getTime() + 60000);
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-house-lib');
+  assert.deepEqual(lifxCalls.filter(c => c.body?.states).at(-1).body.states.map(s => s.color), ['hue:225 saturation:1']);
+});
+

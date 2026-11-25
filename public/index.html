@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-14">
+  <meta name="app-version" content="2026.11.24-15">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-14">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-15">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -81,11 +81,16 @@
     <header class="maker-head">
       <button id="library-back" class="icon-btn" aria-label="Back">‹</button>
       <div class="title-btn" role="heading" aria-level="1">
-        <span class="title-line"><span>Patterns</span></span>
+        <span class="title-line"><span id="library-title">Library</span></span>
         <span id="library-sub" class="muted small"></span>
       </div>
       <span class="icon-btn" aria-hidden="true"></span>
     </header>
+    <div id="library-seg" class="segmented three lib-seg" role="tablist" aria-label="Library">
+      <button role="tab" data-seg="patterns">Patterns</button>
+      <button role="tab" data-seg="colors">Colors</button>
+      <button role="tab" data-seg="schedules">Schedules</button>
+    </div>
     <div id="library-body" class="library"></div>
   </section>
 
@@ -225,23 +230,41 @@
     <header class="maker-head">
       <button id="sched-back" class="icon-btn" aria-label="Back">‹</button>
       <div class="title-btn" role="heading" aria-level="1">
-        <span class="title-line"><span id="sched-title">🌙 Schedule</span></span>
+        <span class="title-line"><span id="sched-title">Schedule</span></span>
         <span id="sched-sub" class="muted small"></span>
       </div>
       <button id="sched-save" class="small">Save</button>
     </header>
 
+    <!-- Library schedule: its name, and which groups use it -->
+    <div id="sched-name-card" class="card">
+      <label class="field-label first-field" for="sched-name"><span>Name</span></label>
+      <input id="sched-name" class="text-field" type="text" maxlength="40" placeholder="Evening" autocomplete="off">
+      <p id="sched-used" class="muted small"></p>
+    </div>
+
     <div class="card">
       <div class="sched-top">
         <h3 class="first">Tonight</h3>
-        <label class="inline small">On <span class="switch"><input id="sched-enabled" type="checkbox"><span></span></span></label>
+        <label id="sched-enabled-wrap" class="inline small">On <span class="switch"><input id="sched-enabled" type="checkbox"><span></span></span></label>
       </div>
       <div id="timeline" class="timeline"></div>
       <p id="timeline-caption" class="muted small"></p>
       <p id="timer-warning" class="hint" hidden></p>
     </div>
 
-    <div class="card">
+    <!-- A group's schedule: which library schedule it follows -->
+    <div id="sched-when-card" class="card">
+      <h3 class="first">When</h3>
+      <button id="sched-when" class="pick-row" aria-expanded="false" aria-controls="sched-when-list"></button>
+      <div id="sched-when-list" class="pick-list" role="radiogroup" aria-label="Schedule" hidden></div>
+      <div class="when-foot">
+        <span id="sched-when-note" class="muted small"></span>
+        <button id="sched-edit-times" class="link small">Edit times</button>
+      </div>
+    </div>
+
+    <div id="sched-on-card" class="card">
       <h3 class="first">Lights on</h3>
       <div id="on-mode" class="segmented two" role="group" aria-label="When to turn on">
         <button data-mode="sunset">At sunset</button>
@@ -263,7 +286,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div id="sched-off-card" class="card">
       <h3 class="first">Lights off</h3>
       <div class="field">
         <label class="field-label" for="off-time"><span>Start fading at</span></label>
@@ -276,7 +299,7 @@
       </div>
     </div>
 
-    <div class="card">
+    <div id="sched-pattern-card" class="card">
       <h3 class="first">Pattern</h3>
       <button id="sched-pattern" class="pick-row" aria-expanded="false" aria-controls="sched-pattern-list"></button>
       <div id="sched-pattern-list" class="pick-list" role="radiogroup" aria-label="Pattern" hidden></div>
@@ -287,7 +310,7 @@
       <p class="muted small">Make and edit patterns in the pattern maker. Changes there are used here automatically. Motion like Chase starts once the lights are fully on.</p>
     </div>
 
-    <div class="card">
+    <div id="sched-days-card" class="card">
       <h3 class="first">Days</h3>
       <div id="sched-days" class="days">
         <button data-day="1" aria-label="Monday">M</button><button data-day="2" aria-label="Tuesday">T</button><button data-day="3" aria-label="Wednesday">W</button><button data-day="4" aria-label="Thursday">T</button><button data-day="5" aria-label="Friday">F</button><button data-day="6" aria-label="Saturday">S</button><button data-day="0" aria-label="Sunday">S</button>
@@ -301,7 +324,7 @@
       <p id="sched-overlap" class="hint" hidden></p>
     </div>
 
-    <div class="card">
+    <div id="sched-loc-card" class="card">
       <h3 class="first">Where’s this house?</h3>
       <div class="loc-row">
         <p id="loc-text" class="muted small grow"></p>
@@ -315,6 +338,18 @@
       <button id="sched-delete" class="small danger" hidden>Delete schedule</button>
     </div>
   </section>
+
+  <!-- Bottom tab bar -->
+  <nav id="tabbar" class="tabbar" aria-label="Sections" hidden>
+    <button id="tab-home" class="tab" aria-current="page">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 10.5 12 4l8 6.5V20a1 1 0 0 1-1 1h-4.5v-6h-5v6H5a1 1 0 0 1-1-1z"/></svg>
+      <span>Home</span>
+    </button>
+    <button id="tab-library" class="tab">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 4h3v16H5zM10.5 4h3v16h-3zM16 5.2l2.9-.8 3.6 15.5-2.9.7z"/></svg>
+      <span>Library</span>
+    </button>
+  </nav>
 
   <!-- Color sheet: pick any color or white -->
   <div id="sheet-scrim" class="scrim" hidden></div>
@@ -353,6 +388,15 @@
     <h2>Houses</h2>
     <div id="house-list" class="house-list"></div>
 
+    <div id="this-house" class="settings-group">
+      <h3>This house</h3>
+      <div class="settings-row">
+        <div class="grow"><strong>Location</strong><span id="house-loc-text" class="muted small"></span></div>
+        <button id="house-loc-btn" class="small">Update</button>
+      </div>
+      <p class="small timer-status" id="timer-status" hidden></p>
+    </div>
+
     <div id="family-section" hidden>
       <h3>Family</h3>
       <div id="family-list" class="family-list"></div>
@@ -371,7 +415,6 @@
     </div>
 
     <p class="muted small" id="settings-info" style="margin-top:16px"></p>
-    <p class="small timer-status" id="timer-status" hidden></p>
     <button id="refresh-btn">Refresh lights</button>
     <button id="signout-btn">Sign out</button>
     <button id="leave-demo" hidden>Leave demo mode</button>
@@ -380,6 +423,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-14"></script>
+  <script src="app.js?v=2026.11.24-15"></script>
 </body>
 </html>

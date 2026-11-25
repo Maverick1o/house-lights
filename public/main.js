@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-14';
-import * as P from './shared/patterns.js?v=2026.11.24-14';
-import * as core from './shared/schedule-core.js?v=2026.11.24-14';
+} from './shared/patterns.js?v=2026.11.24-15';
+import * as P from './shared/patterns.js?v=2026.11.24-15';
+import * as core from './shared/schedule-core.js?v=2026.11.24-15';
 
-const APP_VERSION = '2026.11.24-14';
+const APP_VERSION = '2026.11.24-15';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -45,8 +45,11 @@ let demo = false;
 let sessionToken = null;  // only used when the phone blocks cookies
 let lights = [];
 let groupPrefs = {};      // per-group settings for the current house (synced)
-let saved = [];           // this person's saved patterns (synced)
-let favColors = [];       // this person's quick-pick colors (synced)
+// The house library: shared by everyone with access to the current house.
+let saved = [];           // the house's own patterns (synced)
+let favColors = [];       // the house's quick-pick colors (synced)
+let timings = {};         // id -> library schedule (when it runs), for the current house
+let personal = {};        // this person's own settings ({ patterns, colors } from before the library, collapsed, migrated)
 let collapsedGroups = {}; // houseKey -> [groupId…] this person keeps collapsed (synced)
 let houseLocation = null; // { lat, lon, tz } of the current house, rounded to ~1 km (synced)
 let identifySnapshot = null; // { gid, lights: [...] } to restore after Identify
@@ -86,7 +89,8 @@ function flushSync(only) {
 
 // House settings: each group's settings, plus where the house is (for sunset).
 const saveGroupPrefs = () => house && syncLater(`prefs/house/${house.key}`, { groups: structuredClone(groupPrefs), location: houseLocation });
-const saveUserPrefs = () => syncLater('prefs/user', { patterns: structuredClone(saved), colors: structuredClone(favColors), collapsed: structuredClone(collapsedGroups) });
+const saveUserPrefs = () => syncLater('prefs/user', { ...structuredClone(personal), collapsed: structuredClone(collapsedGroups) });
+const saveLibrary = () => house && syncLater(`prefs/library/${house.key}`, { patterns: structuredClone(saved), colors: structuredClone(favColors) });
 
 // ---------- Talking to the backend ----------
 
@@ -322,6 +326,7 @@ async function paint(selector, pos, cells, level, effect = 'none') {
 //   what: { name, id, kind: 'color' | 'pattern' }
 async function paintGroup(g, cells, effect = 'none', what = {}) {
   const p = gp(g.id);
+  ui.lastGid = g.id;
   await paint(`group_id:${g.id}`, positions(g.lights, g.id), cells, p.level, effect);
   p.last = {
     cells, effect: normalizeMotion(effect), name: what.name || 'Custom colors', id: what.id || null,
@@ -648,16 +653,24 @@ function setCollapsed(gids, collapsed) {
 // Re-draw whichever screen is showing (after lights or settings change).
 function rerender() {
   if (!$('#main').hidden) renderMain();
-  else if (!$('#library').hidden && library) renderLibrary();
+  else if (!$('#library').hidden && libView) renderLibrary();
   else if (!$('#group').hidden && groupScreen) renderGroupScreen();
   else renderMain();
 }
 
-// A group is a small stack of cards that read as one unit:
-//   hero     the lights themselves: what's on, power, brightness (all you see when collapsed)
-//   choose   Colors | Patterns: one thing shows at a time
-//   motion   how it moves
-//   schedule when it comes on by itself
+// A group is one card in two parts:
+//   now     the lights themselves: what's showing, power, brightness
+//           (all you see when the card is collapsed)
+//   adjust  three ways to change what's showing: Color · Motion · Schedule
+// Colors, patterns and schedules are made in the Library; here you only pick.
+
+const ICON = {
+  color: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5c3.2 4.1 6 7.2 6 10.6a6 6 0 0 1-12 0c0-3.4 2.8-6.5 6-10.6z"/></svg>',
+  motion: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12c2.4-5 4.7-5 7 0s4.7 5 7 0 3.3-4.2 5-2.5"/></svg>',
+  schedule: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19.5 14.6A8 8 0 0 1 9.4 4.5a8 8 0 1 0 10.1 10.1z"/></svg>',
+};
+const icon = name => { const s = el('span', { class: 'ico', 'aria-hidden': 'true' }); s.innerHTML = ICON[name]; return s; };
+
 function groupCard(g) {
   const p = gp(g.id);
   const sel = `group_id:${g.id}`;
@@ -679,61 +692,69 @@ function groupCard(g) {
   const toggle = () => setCollapsed([g.id], !collapsed);
 
   const hero = el('div', {
-    class: 'card hero' + (lit ? ' lit' : '') + (collapsed ? ' collapsed' : ''),
+    class: 'now' + (lit ? ' lit' : ''),
     style: lit ? glowStyle(status.colors) : '',
-    // Tapping the card (anywhere but its controls) expands or collapses it.
+    // Tapping this part (anywhere but its controls) opens or closes the card.
     onclick: e => { if (!e.target.closest('button, input, label, .switch')) toggle(); },
   },
-  el('div', { class: 'hero-top' },
+  el('div', { class: 'now-top' },
     el('button', {
       class: 'group-toggle', 'aria-expanded': String(!collapsed), 'aria-label': `${g.name}, ${collapsed ? 'show controls' : 'hide controls'}`, onclick: toggle,
     },
-    el('span', { class: 'hero-name' }, g.name, el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
-    el('span', { class: 'hero-sub', text: sub })),
-    el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name} strips and settings`, title: 'Strips and settings', onclick: () => openGroupScreen(g) }, '⋯'),
+    el('span', { class: 'group-name' }, g.name, el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
+    el('span', { class: 'group-sub', text: sub })),
+    el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name}: strips and order`, title: 'Strips and order', onclick: () => openGroupScreen(g) }, '⋯'),
     toggleSwitch(on, !online.length, e =>
       run(`${g.name} ${e.target.checked ? 'on' : 'off'}`, () => setState(sel, { power: e.target.checked ? 'on' : 'off' })))),
-  el('div', { class: 'hero-status' },
-    el('div', { class: 'status-title', text: status.title }),
-    status.detail && el('div', { class: 'status-detail', text: status.detail })),
+  el('div', { class: 'now-status' },
+    el('div', { class: 'now-label', text: on ? 'Now showing' : online.length ? 'Lights off' : 'Not reachable' }),
+    el('div', { class: 'now-title', text: status.title }),
+    status.detail && el('div', { class: 'now-detail', text: status.detail })),
   lightString(status, on),
   !collapsed && online.length > 0 && brightnessRow(g, now, p, online));
 
-  const stack = el('section', { class: 'group-stack' + (collapsed ? ' collapsed' : ''), 'aria-label': g.name }, hero);
-  if (!online.length || collapsed) return stack;
+  const card = el('section', { class: 'group-card' + (collapsed ? ' collapsed' : ''), 'aria-label': g.name }, hero);
+  if (!online.length || collapsed) return card;
 
-  if (multi && !p.ordered) {
-    stack.append(el('button', { class: 'card tip-row', onclick: () => openGroupScreen(g) },
-      el('span', { class: 'tip-icon', 'aria-hidden': 'true' }, '↔︎'),
-      el('span', { class: 'grow' }, el('strong', { text: 'Set your strip order' }), el('span', { class: 'muted small', text: 'So patterns flow around the house the right way' })),
-      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
-  }
-  stack.append(chooseCard(g, now), motionCard(g, now), !demo ? scheduleCard(g) : '');
-  return stack;
+  const tab = ui.tab[g.id] || 'color';
+  const tabs = [['color', 'Color'], ['motion', 'Motion'], ['schedule', 'Schedule']];
+  card.append(el('div', { class: 'adjust' },
+    el('div', { class: 'adjust-tabs', role: 'tablist', 'aria-label': `Change what ${g.name} shows` },
+      ...tabs.map(([k, label]) => el('button', {
+        role: 'tab', class: 'adjust-tab' + (tab === k ? ' active' : ''), 'aria-selected': String(tab === k),
+        onclick: () => { ui.tab[g.id] = k; renderMain(); },
+      }, icon(k), el('span', { text: label }), k === 'motion' && now?.effect?.type && now.effect.type !== 'none' ? el('span', { class: 'tab-dot', 'aria-label': '(moving)' }) : null))),
+    el('div', { class: 'adjust-panel', role: 'tabpanel' },
+      tab === 'color' ? colorTab(g, now) : tab === 'motion' ? motionTab(g, now) : demo ? el('p', { class: 'muted small', text: 'Schedules aren’t available in demo mode.' }) : scheduleTab(g))),
+  multi && !p.ordered && el('button', { class: 'card-tip', onclick: () => openGroupScreen(g) },
+    el('span', { class: 'grow' }, el('strong', { text: 'Set your strip order' }), el('span', { class: 'muted small', text: 'So patterns flow around the house the right way' })),
+    el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+  return card;
 }
 
-// What the hero says: what's on now, or (when off) what's next.
+// What the top of the card says: what's on now, or (when off) what's next.
 function groupStatus(g, now, on, online) {
   const lightColors = () => online.filter(l => l.power === 'on').map(cssColor);
   if (!online.length) return { title: 'Offline', detail: 'Check the lights’ power and Wi-Fi', colors: [] };
   if (!on) {
     const next = !demo && nextScheduled(g);
-    if (!next) return { title: 'Off', detail: '', colors: [] };
+    if (!next) return { title: 'Off', detail: 'No schedule', colors: [] };
     const tz = next.s.location.tz;
-    return { title: 'Off', detail: `Fades on ${dayWord(next.plan, tz).toLowerCase()} at ${fmtTime(next.plan.fadeInStart, tz)} · ${scheduledName(g, next.s)}`, colors: [] };
+    return { title: `Fades on ${dayWord(next.plan, tz).toLowerCase()} at ${fmtTime(next.plan.fadeInStart, tz)}`, detail: scheduledName(g, next.s), colors: [] };
   }
-  if (!now) return { title: 'On', detail: 'Colors set outside this app', colors: lightColors() };
+  if (!now) return { title: 'Colors set elsewhere', detail: 'Pick something below to take over', colors: lightColors() };
   const t = d => fmtTime(d, now.tz);
   const moving = now.effect?.type && now.effect.type !== 'none' ? ` · ${MOTION_NAME[now.effect.type]}` : '';
   return {
     title: patternLabel(now.name, now.id) + moving,
     detail: now.scheduled ? `From your schedule · fades off at ${t(now.until)}` : now.until ? `Until the ${t(now.until)} fade-off` : '',
     cells: now.cells,
-    colors: (now.cells || []).filter(x => x.b > 0).map(cellCss),
+    // Unknown cells (e.g. someone else's pattern): use the lights' own colors.
+    colors: now.cells ? now.cells.filter(x => x.b > 0).map(cellCss) : lightColors(),
   };
 }
 
-// The lights as a string of glowing dots, in their current colors.
+// The lights as a string of glowing bulbs, in their current colors.
 function lightString(status, on, count = 30) {
   const box = el('div', { class: 'light-string' + (on ? '' : ' dark'), 'aria-hidden': 'true' });
   const cells = status.cells;
@@ -750,15 +771,14 @@ function lightString(status, on, count = 30) {
   return box;
 }
 
-// A soft wash of the lights' colors behind the hero card.
+// A soft wash of the lights' colors behind the top of the card.
 function glowStyle(colors) {
   const at = f => colors[Math.min(colors.length - 1, Math.floor(f * colors.length))];
   const mix = (c, pct) => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
   return `background:
-    radial-gradient(120% 90% at 0% 0%, ${mix(at(0.1), 30)}, transparent 65%),
-    radial-gradient(120% 90% at 100% 100%, ${mix(at(0.9), 26)}, transparent 65%),
-    radial-gradient(90% 80% at 70% 0%, ${mix(at(0.5), 18)}, transparent 70%),
-    var(--card);`;
+    radial-gradient(120% 100% at 0% 0%, ${mix(at(0.1), 30)}, transparent 65%),
+    radial-gradient(120% 100% at 100% 100%, ${mix(at(0.9), 24)}, transparent 65%),
+    radial-gradient(90% 80% at 70% 0%, ${mix(at(0.5), 16)}, transparent 70%);`;
 }
 
 function brightnessRow(g, now, p, online) {
@@ -786,69 +806,47 @@ function brightnessRow(g, now, p, online) {
 }
 
 const MOTION_NAME = { none: 'Steady', chase: 'Chase', breathe: 'Breathe', pulse: 'Pulse' };
-
-// ----- Colors | Patterns: one thing shows at a time -----
-
-function chooseCard(g, now) {
-  const tab = ui.tab[g.id] || (isSolid(now) ? 'color' : 'pattern');
-  return el('div', { class: 'card section' },
-    el('div', { class: 'segmented two', role: 'tablist', 'aria-label': 'Show colors or patterns' },
-      ...[['color', 'Colors'], ['pattern', 'Patterns']].map(([k, label]) => el('button', {
-        role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k),
-        onclick: () => { ui.tab[g.id] = k; ui.editColors = null; renderMain(); },
-      }, label))),
-    tab === 'color' ? colorsPanel(g, now) : patternsPanel(g, now));
-}
-
 const isWhite = c => (parseColor(c).saturation ?? 0) < 0.05;
 
-function colorsPanel(g, now) {
+// ----- Color: patterns that fit right now, the house's colors, the library -----
+
+function colorTab(g, now) {
   const anyColor = g.lights.some(hasColor);
   const favs = favColors.filter(f => anyColor || isWhite(f.c));
   const current = isSolid(now) ? now.cells[0].c : null;
-  const editing = ui.editColors === g.id;
-  const swatches = favs.map(f => {
-    const label = f.name || colorName(f.c);
-    if (editing) {
-      return el('button', {
-        class: 'swatch-btn removable', style: `background:${colorCss(f.c)}`, 'aria-label': `Remove ${label}`, title: `Remove ${label}`,
-        onclick: () => { favColors = favColors.filter(x => x !== f); saveUserPrefs(); renderMain(); },
-      }, el('span', { class: 'remove-badge', 'aria-hidden': 'true' }, '✕'));
-    }
-    return sw(colorCss(f.c), label, () => playColor(g, f.c, label), {
-      class: 'swatch-btn' + (current === f.c ? ' active' : ''), 'aria-pressed': String(current === f.c),
-    });
-  });
-  const more = el('button', {
-    class: 'swatch-btn more-colors', title: editing ? 'Add a color' : 'Any color', 'aria-label': editing ? 'Add a color to your favorites' : 'Pick any color',
-    onclick: () => openColorSheet({
-      title: editing ? 'Add a favorite color' : `Any color · ${g.name}`,
-      initial: current || 'hue:210 saturation:1',
-      whiteOnly: !anyColor,
-      useLabel: editing ? 'Add to my colors' : 'Show this color',
-      offerFavorite: !editing,
-      onPick: c => {
-        if (editing) { addFavorite(c); renderMain(); } else playColor(g, c, colorName(c));
-      },
-    }),
-  }, el('span', { 'aria-hidden': 'true' }, '+'));
-  return el('div', { class: 'section-body' },
-    el('div', { class: 'swatch-grid' }, ...swatches, more),
-    el('div', { class: 'panel-foot' },
-      editing
-        ? [el('button', { class: 'link small', onclick: () => { favColors = defaultFavorites(); saveUserPrefs(); renderMain(); } }, 'Reset to defaults'),
-          el('button', { class: 'link small strong', onclick: () => { ui.editColors = null; renderMain(); } }, 'Done')]
-        : [el('span'), el('button', { class: 'link small', onclick: () => { ui.editColors = g.id; renderMain(); } }, 'Edit colors')]));
+  return el('div', { class: 'panel-stack' },
+    el('div', { class: 'panel-label' }, el('span', { text: 'Patterns' }), el('span', { class: 'muted small', text: 'In season and recent' })),
+    el('div', { class: 'pattern-grid' }, ...topPatterns(g, now).map(pt => patternChip(g, pt, now))),
+    el('div', { class: 'panel-label' }, el('span', { text: 'Solid colors' }),
+      el('button', { class: 'link small', onclick: () => openLibraryTab('colors') }, 'Edit')),
+    el('div', { class: 'swatch-row' },
+      ...favs.map(f => {
+        const label = f.name || colorName(f.c);
+        return sw(colorCss(f.c), label, () => playColor(g, f.c, label), {
+          class: 'swatch-btn' + (current === f.c ? ' active' : ''), 'aria-pressed': String(current === f.c),
+        });
+      }),
+      el('button', {
+        class: 'swatch-btn more-colors', title: 'Any color', 'aria-label': 'Pick any color',
+        onclick: () => openColorSheet({
+          title: `Any color · ${g.name}`, initial: current || 'hue:210 saturation:1', whiteOnly: !anyColor,
+          useLabel: 'Show this color', offerFavorite: true, onPick: c => playColor(g, c, colorName(c)),
+        }),
+      }, el('span', { 'aria-hidden': 'true' }, '+'))),
+    el('button', { class: 'all-row', onclick: () => openLibrary(g) },
+      el('span', { class: 'grow' }, 'Browse the library'),
+      el('span', { class: 'muted small', text: `${BUILTIN.length + saved.length} patterns` }),
+      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
 }
 
 function addFavorite(c) {
   if (favColors.some(f => f.c === c)) return showActivity('Already in your colors', 'ok');
   favColors = [...favColors, { c, name: colorName(c) }].slice(0, 24);
-  saveUserPrefs();
-  showActivity('✓ Added to your colors', 'ok');
+  saveLibrary();
+  showActivity('✓ Added to the house colors', 'ok');
 }
 
-// In-season holidays, then what you've played lately, then your own patterns.
+// In-season holidays, then what's been played lately, then the house's own patterns.
 function topPatterns(g, now) {
   const today = new Date();
   const out = [];
@@ -874,18 +872,16 @@ function patternChip(g, pt, now) {
   }, previewStrip(patternCells(pt, g.id, Math.min(n, 48)), 16), el('span', { class: 'chip-name', text: patternLabel(pt.name, pt.id) }));
 }
 
-function patternsPanel(g, now) {
-  return el('div', { class: 'section-body' },
-    el('div', { class: 'pattern-grid' }, ...topPatterns(g, now).map(pt => patternChip(g, pt, now))),
-    el('button', { class: 'all-row', onclick: () => openLibrary(g) },
-      el('span', { class: 'grow' }, 'All patterns'),
-      el('span', { class: 'muted small', text: `${BUILTIN.length + saved.length}` }),
-      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
-}
-
 // ----- Motion: how what's showing moves, changed on the spot -----
 
-function motionCard(g, now) {
+const MOTION_HELP = {
+  none: 'The colors stay still.',
+  chase: 'The colors travel along the lights.',
+  breathe: 'The lights fade gently down and back up.',
+  pulse: 'The lights blink in a steady beat.',
+};
+
+function motionTab(g, now) {
   const sel = `group_id:${g.id}`;
   const mo = normalizeMotion(now?.effect);
   const apply = (next, label) => run(`${label} · ${g.name}`, async () => {
@@ -893,13 +889,13 @@ function motionCard(g, now) {
     if (next.type !== 'none') await startMotion(sel, next);
     setLastMotion(g, next, now);
   });
-  return el('div', { class: 'card section' },
-    el('div', { class: 'section-title' }, 'Motion'),
+  return el('div', { class: 'panel-stack' },
     el('div', { class: 'segmented four', role: 'group', 'aria-label': 'Motion' },
       ...['none', 'chase', 'breathe', 'pulse'].map(type => el('button', {
         class: mo.type === type ? 'active' : '', 'aria-pressed': String(mo.type === type),
         onclick: () => apply({ ...mo, type }, MOTION_NAME[type]),
       }, MOTION_NAME[type]))),
+    el('p', { class: 'muted small panel-note', text: MOTION_HELP[mo.type] }),
     mo.type !== 'none' && el('div', { class: 'motion-extra' },
       mo.type === 'chase' && el('button', {
         class: 'small', 'aria-label': 'Change direction',
@@ -911,7 +907,8 @@ function motionCard(g, now) {
           type: 'range', min: 0, max: 100, value: Math.round(mo.speed * 100), 'aria-label': 'Speed, slow to fast',
           onchange: e => apply({ ...mo, speed: e.target.value / 100 }, 'Speed'),
         }),
-        el('span', { class: 'muted small', text: 'Fast' }))));
+        el('span', { class: 'muted small', text: 'Fast' }))),
+    el('p', { class: 'muted small panel-note', text: 'Changes this group only. A pattern’s own motion is set in the pattern maker.' }));
 }
 
 // Remember a motion change on what's showing, so "last played" (and the
@@ -924,23 +921,43 @@ function setLastMotion(g, mo, now) {
   saveGroupPrefs();
 }
 
-// ----- Schedule: when the lights come on by themselves -----
+// ----- Schedule: which library schedules this group follows -----
 
-function scheduleCard(g) {
+function scheduleTab(g) {
   const list = groupSchedules(g.id);
-  if (!list.length) {
-    return el('button', { class: 'card section add-schedule', onclick: () => openSchedule(g, null) },
-      el('span', { class: 'sched-icon', text: '🌙' }),
-      el('span', { class: 'grow' }, el('strong', { text: 'Add a schedule' }), el('span', { class: 'muted small', text: 'Fade on at sunset, off at bedtime' })),
-      el('span', { class: 'chev', text: '›' }));
-  }
   const stale = timerInfo?.configured && (!timerInfo.lastTick || Date.now() - timerInfo.lastTick > 20 * 60000) && !timerInfo.repaired;
-  return el('div', { class: 'card section' },
-    el('div', { class: 'section-title' },
-      el('span', { class: 'grow' }, list.length === 1 ? 'Schedule' : 'Schedules'),
-      el('button', { class: 'link small', onclick: () => openSchedule(g, null) }, '+ Add')),
+  if (!list.length) {
+    return el('div', { class: 'panel-stack empty-state' },
+      el('div', { class: 'empty-icon' }, icon('schedule')),
+      el('strong', { text: 'No schedule yet' }),
+      el('p', { class: 'muted small', text: 'Fade on at sunset and off at bedtime, every evening, even with your phone off.' }),
+      el('button', { class: 'primary', onclick: () => openSchedule(g, null) }, 'Add a schedule'));
+  }
+  return el('div', { class: 'panel-stack' },
     el('div', { class: 'list' }, ...list.map(s => scheduleRow(g, s))),
+    el('button', { class: 'all-row', onclick: () => openSchedule(g, null) },
+      el('span', { class: 'grow' }, 'Add a schedule'), el('span', { class: 'chev', 'aria-hidden': 'true' }, '+')),
     stale && list.some(s => s.enabled) && el('p', { class: 'hint warn small', text: 'The schedule timer hasn’t checked in lately. It’s being restarted; check again in a few minutes.' }));
+}
+
+function scheduleRow(g, s) {
+  const { title, detail } = tonightText(g, s);
+  const name = timings[s.timingId]?.name || 'Schedule';
+  return el('div', { class: 'schedule-row' + (s.enabled ? '' : ' paused') },
+    el('button', { class: 'sched-open', 'aria-label': `${name}: ${title}. ${detail}`, onclick: () => openSchedule(g, s) },
+      el('span', { class: 'grow' },
+        el('strong', { text: name }),
+        el('span', { class: 'small', text: title }),
+        el('span', { class: 'muted small', text: detail }))),
+    toggleSwitch(s.enabled, false, async e => {
+      const enabled = e.target.checked;
+      try {
+        const res = await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: { ...s, enabled } });
+        upsertSchedule(res.schedule);
+        showActivity(enabled ? `✓ ${name} on` : `${name} paused`, 'ok');
+      } catch (err) { showActivity(err.message, 'err'); }
+      renderMain();
+    }));
 }
 
 // A small strip of color previewing cells (sampled down to fit).
@@ -1049,18 +1066,32 @@ function orderEditor(g) {
   ];
 }
 
-// ---------- Pattern library ----------
-// Every pattern in one place: yours first, then what's in season, holidays,
-// moods and basics. Tap to show it; ✎ to edit yours or make your own version
-// of a built-in.
+// ---------- Library ----------
+// The house's patterns, colors and schedules: made, edited and deleted here,
+// used by every group. Two ways in:
+//   browse  the Library tab: manage everything
+//   pick    from a group's card: tap a pattern or color to show it on that group
 
-let library = null; // { gid }
+let libView = null; // { mode: 'browse' | 'pick', gid, seg: 'patterns' | 'colors' | 'schedules', editColors }
 
-function openLibrary(g) {
-  library = { gid: g.id };
+function openLibrary(g, seg = 'patterns') {
+  libView = { mode: 'pick', gid: g.id, seg };
   show('library');
   window.scrollTo(0, 0);
   renderLibrary();
+}
+
+function openLibraryTab(seg = libView?.seg || 'patterns') {
+  libView = { mode: 'browse', gid: null, seg };
+  show('library');
+  window.scrollTo(0, 0);
+  renderLibrary();
+}
+
+// The group the pattern maker previews on when you start from the Library.
+function previewGroup() {
+  const groups = getGroups();
+  return groups.find(g => g.id === ui.lastGid) || [...groups].sort((a, b) => positions(b.lights, b.id).length - positions(a.lights, a.id).length)[0] || null;
 }
 
 const SEASON_MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -1070,41 +1101,147 @@ const seasonText = pt => pt.seasons?.length
 const canCustomize = pt => !isSavedId(pt.id) && pt.layout !== 'blend';
 
 function renderLibrary() {
-  const g = groupById(library.gid);
-  if (!g) { show('main'); renderMain(); return; }
-  const now = showing(g);
-  const n = positions(g.lights, g.id).length;
-  $('#library-sub').textContent = g.name;
+  const v = libView;
+  const g = v.gid ? groupById(v.gid) : null;
+  const pick = v.mode === 'pick' && g;
+  if (v.mode === 'pick' && !g) { libView = null; show('main'); renderMain(); return; }
+  if (pick && v.seg === 'schedules') v.seg = 'patterns';
+  $('#library-title').textContent = pick ? `Choose for ${g.name}` : 'Library';
+  $('#library-sub').textContent = pick ? 'Tap to show it now' : `${house?.name || 'Demo House'} · shared with everyone here`;
+  $('#library-back').hidden = !pick;
+  $('#library').classList.toggle('browse', !pick); // a top-level tab: large title, like Home
+  document.querySelectorAll('#library-seg button').forEach(b => {
+    b.classList.toggle('active', b.dataset.seg === v.seg);
+    b.setAttribute('aria-selected', String(b.dataset.seg === v.seg));
+    b.hidden = pick && b.dataset.seg === 'schedules';
+  });
+  $('#library-seg').classList.toggle('two', !!pick);
+  $('#library-seg').classList.toggle('three', !pick);
+  const body = v.seg === 'colors' ? libraryColors(g) : v.seg === 'schedules' ? librarySchedules() : libraryPatterns(g);
+  $('#library-body').replaceChildren(...body.filter(Boolean));
+}
+
+function libraryPatterns(g) {
+  const pg = g || previewGroup();
+  const now = g ? showing(g) : null;
+  const n = pg ? positions(pg.lights, pg.id).length : 40;
+  const cellsFor = pt => (pg ? patternCells(pt, pg.id, Math.min(n, 60)) : P.patternCells(pt, {}, 40));
   const row = (pt, sub) => {
     const active = !!now && !isSolid(now) && (now.id ? now.id === pt.id : now.name === pt.name);
     const mo = patternMotion(pt);
     const details = [sub, mo.type !== 'none' && MOTION_NAME[mo.type]].filter(Boolean).join(' · ');
+    const mine = isSavedId(pt.id);
+    const edit = () => pg && openMaker(pg.id, pt, { from: 'library', copy: !mine });
+    const play = g
+      ? () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)).then(() => { if (libView) renderLibrary(); })
+      : mine || canCustomize(pt) ? edit : null;
     return el('div', { class: 'lib-row' + (active ? ' active' : '') },
-      el('button', {
-        class: 'lib-play', 'aria-pressed': String(active),
-        onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)).then(() => { if (library) renderLibrary(); }),
-      },
-      previewStrip(patternCells(pt, g.id, Math.min(n, 60)), 30),
-      el('span', { class: 'grow' }, el('strong', { text: patternLabel(pt.name, pt.id) }), details && el('span', { class: 'muted small', text: details })),
-      active && el('span', { class: 'check', text: '✓' })),
-      isSavedId(pt.id)
-        ? el('button', { class: 'icon-btn ghost', 'aria-label': `Edit ${pt.name}`, title: 'Edit', onclick: () => openMaker(g.id, pt, { from: 'library' }) }, '✎')
-        : canCustomize(pt) && el('button', { class: 'icon-btn ghost', 'aria-label': `Make your own version of ${pt.name}`, title: 'Make your own version', onclick: () => openMaker(g.id, pt, { from: 'library', copy: true }) }, '✎'));
+      el('button', { class: 'lib-play', 'aria-pressed': g ? String(active) : null, disabled: !play, onclick: play },
+        previewStrip(cellsFor(pt), 30),
+        el('span', { class: 'grow' }, el('strong', { text: patternLabel(pt.name, pt.id) }), details && el('span', { class: 'muted small', text: details })),
+        active && el('span', { class: 'check', text: '✓' }),
+        !g && play && el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
+      g && (mine || canCustomize(pt)) && el('button', {
+        class: 'icon-btn ghost', 'aria-label': mine ? `Edit ${pt.name}` : `Make your own version of ${pt.name}`,
+        title: mine ? 'Edit' : 'Make your own version', onclick: edit,
+      }, '✎'));
   };
   const today = new Date();
-  const sections = [
-    el('button', { class: 'lib-new', onclick: () => openMaker(g.id, null, { from: 'library' }) },
+  const out = [
+    pg && el('button', { class: 'lib-new', onclick: () => openMaker(pg.id, null, { from: 'library' }) },
       el('span', { class: 'lib-new-icon', 'aria-hidden': 'true' }, '+'),
-      el('span', { class: 'grow' }, el('strong', { text: 'Create a new pattern' }), el('span', { class: 'muted small', text: 'Paint your own colors, spacing and motion' }))),
+      el('span', { class: 'grow' }, el('strong', { text: 'New pattern' }), el('span', { class: 'muted small', text: 'Your own colors, spacing and motion' }))),
   ];
-  const section = (title, items) => items.length && sections.push(el('h3', { text: title }), el('div', { class: 'lib-list' }, ...items));
-  section('Your patterns', [...saved].reverse().map(pt => row(pt, 'Yours')));
+  const section = (title, items, note) => {
+    if (!items.length) return;
+    out.push(el('h3', { text: title }), el('div', { class: 'lib-list' }, ...items));
+    if (note) out.push(el('p', { class: 'muted small lib-note', text: note }));
+  };
+  section(`${house?.name || 'House'} patterns`, [...saved].reverse().map(pt => row(pt, '')));
   section('In season now', BUILTIN.filter(b => inSeason(b, today)).map(pt => row(pt, seasonText(pt))));
   for (const c of CATEGORIES) {
-    section(c.name, BUILTIN.filter(b => b.category === c.id && !(c.id === 'holidays' && inSeason(b, today))).map(pt => row(pt, c.id === 'holidays' ? seasonText(pt) : '')));
+    section(c.name, BUILTIN.filter(b => b.category === c.id && !(c.id === 'holidays' && inSeason(b, today))).map(pt => row(pt, c.id === 'holidays' ? seasonText(pt) : '')),
+      c.id === 'cozy' ? 'Moods use the colors of the LIFX app’s Moods, blended smoothly along your lights.' : '');
   }
-  sections.push(el('p', { class: 'muted small center', text: 'Moods use the colors of the LIFX app’s Moods, blended smoothly along your lights.' }));
-  $('#library-body').replaceChildren(...sections);
+  if (!g) out.push(el('p', { class: 'muted small lib-note', text: 'Built-in patterns can’t be changed, but you can make your own version of any repeating one.' }));
+  return out;
+}
+
+function libraryColors(g) {
+  const v = libView;
+  const editing = !!v.editColors;
+  const tile = f => {
+    const label = f.name || colorName(f.c);
+    const current = g && isSolid(showing(g)) && showing(g).cells[0].c === f.c;
+    return el('button', {
+      class: 'color-tile' + (editing ? ' editing' : '') + (current ? ' active' : ''),
+      'aria-label': editing ? `Remove ${label}` : g ? `Show ${label} on ${g.name}` : label,
+      onclick: () => {
+        if (editing) { favColors = favColors.filter(x => x !== f); saveLibrary(); renderLibrary(); return; }
+        if (g) playColor(g, f.c, label).then(() => { if (libView) renderLibrary(); });
+      },
+    },
+    el('span', { class: 'color-dot', style: `background:${colorCss(f.c)}` }, editing && el('span', { class: 'remove-badge', 'aria-hidden': 'true' }, '✕')),
+    el('span', { class: 'color-name', text: label }));
+  };
+  return [
+    el('div', { class: 'section-head-row' },
+      el('h3', { text: g ? 'Solid colors' : 'House colors' }),
+      !g && el('button', { class: 'link small strong', onclick: () => { v.editColors = !editing; renderLibrary(); } }, editing ? 'Done' : 'Edit')),
+    el('div', { class: 'card color-grid' },
+      ...favColors.map(tile),
+      el('button', {
+        class: 'color-tile', 'aria-label': 'Add a color',
+        onclick: () => openColorSheet({
+          title: g ? `Any color · ${g.name}` : 'Add a house color', initial: 'hue:210 saturation:1',
+          useLabel: g ? 'Show this color' : 'Add to house colors', offerFavorite: !!g,
+          onPick: c => { if (g) playColor(g, c, colorName(c)); else { addFavorite(c); renderLibrary(); } },
+        }),
+      }, el('span', { class: 'color-dot more-colors' }, el('span', { 'aria-hidden': 'true' }, '+')), el('span', { class: 'color-name', text: g ? 'Any color' : 'Add' }))),
+    el('p', { class: 'muted small lib-note', text: 'These are the quick picks on every group’s Color tab.' }),
+    editing && el('button', { class: 'link small', onclick: () => { favColors = defaultFavorites(); saveLibrary(); renderLibrary(); } }, 'Reset to the default colors'),
+  ];
+}
+
+// "Sunset · fade in 1 hr → 11:00 PM · fade out 30 min · Every day"
+const DAY_NAMES = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+function daysText(days) {
+  const d = [...days].sort().join(',');
+  if (d === '0,1,2,3,4,5,6') return 'Every day';
+  if (d === '1,2,3,4,5') return 'Weeknights';
+  if (d === '0,6') return 'Weekends';
+  return days.map(x => DAY_NAMES[x]).join(', ');
+}
+const clock = hhmm => { const [h, m] = hhmm.split(':').map(Number); return new Date(2000, 0, 1, h, m).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); };
+function timingSummary(t) {
+  const on = t.on.mode === 'sunset'
+    ? (t.on.offsetMin ? `${Math.abs(t.on.offsetMin)} min ${t.on.offsetMin < 0 ? 'before' : 'after'} sunset` : 'Sunset')
+    : clock(t.on.time);
+  const season = t.season ? ` · ${seasonText({ seasons: [[t.season.from, t.season.to]] })}` : '';
+  return `${on} → ${clock(t.off.time)} · ${daysText(t.days)}${season}`;
+}
+const groupsUsing = id => allSchedules().filter(s => s.timingId === id).map(s => groupById(s.groupId)?.name || s.groupName);
+
+function librarySchedules() {
+  const list = Object.values(timings).sort((a, b) => a.name.localeCompare(b.name));
+  return [
+    el('button', { class: 'lib-new', onclick: () => openTiming(null) },
+      el('span', { class: 'lib-new-icon', 'aria-hidden': 'true' }, '+'),
+      el('span', { class: 'grow' }, el('strong', { text: 'New schedule' }), el('span', { class: 'muted small', text: 'When lights fade on and off' }))),
+    list.length ? el('h3', { text: 'Schedules' }) : el('p', { class: 'muted small lib-note', text: 'No schedules yet. Make one here, then pick it on any group’s Schedule tab.' }),
+    list.length && el('div', { class: 'lib-list' }, ...list.map(t => {
+      const used = groupsUsing(t.id);
+      return el('div', { class: 'lib-row' },
+        el('button', { class: 'lib-play', onclick: () => openTiming(t) },
+          el('span', { class: 'sched-badge', 'aria-hidden': 'true' }, icon('schedule')),
+          el('span', { class: 'grow' },
+            el('strong', { text: t.name }),
+            el('span', { class: 'muted small', text: timingSummary(t) }),
+            el('span', { class: 'small used', text: used.length ? `Used by ${used.join(', ')}` : 'Not used by any group yet' })),
+          el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+    })),
+    list.length && el('p', { class: 'muted small lib-note', text: 'Changing a schedule here changes it for every group that uses it.' }),
+  ];
 }
 
 // ---------- Pattern maker ----------
@@ -1196,7 +1333,7 @@ function undo() {
 function closeMaker(force = false) {
   if (!force && isDirty() && !confirm('Leave without saving? Your changes to this pattern will be lost.')) return;
   closeSheet();
-  const back = maker.from === 'library' && library ? 'library' : 'main';
+  const back = maker.from === 'library' && libView ? 'library' : 'main';
   maker = null;
   show(back);
   rerender();
@@ -1554,6 +1691,7 @@ function upsertSchedule(s) {
   schedules[s.groupId] = [...list, s];
 }
 function removeSchedule(s) {
+  if (!s) return;
   schedules[s.groupId] = (schedules[s.groupId] || []).filter(x => x.id !== s.id);
 }
 
@@ -1633,35 +1771,34 @@ function tonightText(g, s) {
   };
 }
 
-function scheduleRow(g, s) {
-  const { title, detail } = tonightText(g, s);
-  return el('div', { class: 'schedule-row' + (s.enabled ? '' : ' paused') },
-    el('button', { class: 'sched-open', 'aria-label': `Schedule: ${title}. ${detail}`, onclick: () => openSchedule(g, s) },
-      el('span', { class: 'sched-icon', text: '🌙' }),
-      el('span', { class: 'grow' }, el('strong', { text: title }), el('span', { class: 'muted small', text: detail }))),
-    toggleSwitch(s.enabled, false, async e => {
-      const enabled = e.target.checked;
-      try {
-        const res = await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: { ...s, enabled } });
-        upsertSchedule(res.schedule);
-        showActivity(enabled ? '✓ Schedule on' : 'Schedule paused', 'ok');
-      } catch (err) { showActivity(err.message, 'err'); }
-      renderMain();
-    }));
-}
 
-let sched = null; // the schedule being edited: { g, s, dirty }
+// The schedule screen edits one of two things:
+//   'use'     a group's schedule: which library schedule it follows, the
+//             pattern and brightness, on/off and skip tonight
+//   'timing'  a library schedule: its name and when it runs (every group
+//             using it follows)
+let sched = null; // { mode, g, s, isNew, start, picking, pickingWhen, back }
 
-async function openSchedule(g, existing) {
+const TIMING_FIELDS = ['on', 'off', 'days', 'season'];
+const timesOf = t => Object.fromEntries(TIMING_FIELDS.map(f => [f, clone(t[f])]));
+
+async function openSchedule(g, existing, opts = {}) {
+  const firstFree = Object.values(timings).find(t => !groupSchedules(g.id).some(x => x.timingId === t.id)) || Object.values(timings)[0];
+  if (!existing && !firstFree && !opts.timingId) {
+    // Nothing in the library yet: make the schedule first, then come back here.
+    return openTiming(null, { thenUseFor: g });
+  }
+  const timing = timings[opts.timingId] || (existing && timings[existing.timingId]) || firstFree;
   const s = existing ? clone(existing) : {
     ...clone(core.DEFAULT_SCHEDULE),
     id: newScheduleId(),
     groupId: g.id,
     groupName: g.name,
-    location: houseLocation || allSchedules().find(x => x.location)?.location || null,
     // New schedules fade on whatever was played last, so they never surprise you.
     pattern: { source: 'last', name: 'Last played' },
   };
+  if (timing) Object.assign(s, timesOf(timing), { timingId: timing.id });
+  s.location = houseLocation || s.location || null;
   // Schedules from before patterns were linked kept only a name: link them up.
   if (!s.pattern.source) {
     const b = BUILTIN.find(x => x.name === s.pattern.name);
@@ -1669,17 +1806,43 @@ async function openSchedule(g, existing) {
     if (b) s.pattern = { ...s.pattern, source: 'builtin', id: b.id };
     else if (mine) s.pattern = { ...s.pattern, source: 'saved', id: mine.id };
   }
-  sched = { g, s, isNew: !existing, start: JSON.stringify(s), picking: false };
+  sched = { mode: 'use', g, s, isNew: !existing, start: JSON.stringify(s), picking: false, pickingWhen: false, back: opts.back || 'main' };
   show('sched');
   window.scrollTo(0, 0);
   renderSchedule();
 }
 
+// opts.thenUseFor: a group to add this schedule to once it's saved.
+function openTiming(t, opts = {}) {
+  const base = t ? clone(t) : { id: `t${newScheduleId()}`, name: uniqueTimingName(), ...timesOf(core.DEFAULT_SCHEDULE) };
+  const s = { ...base, enabled: true, skipDates: [], level: 1, location: houseLocation };
+  sched = { mode: 'timing', s, isNew: !t, start: JSON.stringify(s), thenUseFor: opts.thenUseFor || null, back: opts.back || (opts.thenUseFor ? 'main' : 'library') };
+  show('sched');
+  window.scrollTo(0, 0);
+  renderSchedule();
+}
+
+function uniqueTimingName() {
+  const taken = new Set(Object.values(timings).map(t => t.name));
+  if (!taken.has('Evening')) return 'Evening';
+  for (let n = 2; ; n++) if (!taken.has(`Evening ${n}`)) return `Evening ${n}`;
+}
+
 function closeSchedule(force = false) {
   if (!force && sched && JSON.stringify(sched.s) !== sched.start && !confirm('Leave without saving your schedule changes?')) return;
+  if (sched?.returnToUse) {
+    // Back from editing times to the group's schedule.
+    const { g, id } = sched.returnToUse;
+    const existing = allSchedules().find(x => x.id === id);
+    sched = null;
+    openSchedule(g, existing || null);
+    return;
+  }
+  const back = sched?.back === 'library' && libView ? 'library' : sched?.back === 'library' ? 'library-tab' : 'main';
   sched = null;
-  show('main');
-  renderMain();
+  if (back === 'library-tab') { openLibraryTab('schedules'); return; }
+  show(back);
+  rerender();
 }
 
 // ----- The schedule's pattern picker -----
@@ -1755,10 +1918,31 @@ function renderPatternPicker() {
 }
 
 function renderSchedule() {
-  const { g, s } = sched;
-  $('#sched-sub').textContent = `${g.name} · ${house.name}`;
+  const { g, s, mode } = sched;
+  const timingMode = mode === 'timing';
+  const timing = timingMode ? s : timings[s.timingId];
+  $('#sched-title').textContent = timingMode ? (sched.isNew ? 'New schedule' : s.name || 'Schedule') : (timing?.name || 'Schedule');
+  $('#sched-sub').textContent = timingMode ? `Library · ${house?.name || ''}` : `${g.name} · ${house.name}`;
   $('#sched-save').textContent = sched.isNew ? 'Save' : JSON.stringify(s) === sched.start ? 'Saved ✓' : 'Save';
   $('#sched-save').classList.toggle('primary', JSON.stringify(s) !== sched.start || sched.isNew);
+
+  // What each mode shows: a library schedule edits times; a group's schedule
+  // picks one, plus its pattern and brightness.
+  $('#sched-name-card').hidden = !timingMode;
+  $('#sched-when-card').hidden = timingMode;
+  for (const id of ['#sched-on-card', '#sched-off-card', '#sched-days-card']) $(id).hidden = !timingMode;
+  $('#sched-pattern-card').hidden = timingMode;
+  $('#sched-loc-card').hidden = !timingMode && !!s.location;
+  $('#sched-enabled-wrap').hidden = timingMode;
+  if (timingMode) {
+    if (document.activeElement !== $('#sched-name')) $('#sched-name').value = s.name;
+    const used = groupsUsing(s.id);
+    $('#sched-used').textContent = used.length
+      ? `Used by ${used.join(', ')}. Changes apply to ${used.length === 1 ? 'it' : 'all of them'}.`
+      : sched.thenUseFor ? `Will be added to ${sched.thenUseFor.name} when you save.` : 'Not used by any group yet. Pick it on a group’s Schedule tab.';
+  } else {
+    renderWhenPicker();
+  }
 
   // Lights on
   document.querySelectorAll('#on-mode button').forEach(b => b.classList.toggle('active', b.dataset.mode === s.on.mode));
@@ -1776,8 +1960,8 @@ function renderSchedule() {
   $('#off-fade').value = s.off.fadeMin;
   $('#off-fade-label').textContent = s.off.fadeMin ? `Fade out over ${fmtDur(s.off.fadeMin)}` : 'Turn off instantly';
 
-  // Pattern
-  renderPatternPicker();
+  // Pattern (a group's schedule only)
+  if (!timingMode) renderPatternPicker();
   $('#sched-level').value = Math.round(s.level * 100);
   $('#sched-level-label').textContent = `${Math.round(s.level * 100)}%`;
 
@@ -1800,20 +1984,21 @@ function renderSchedule() {
 
   // Tonight
   const today = s.location ? core.ymd(core.zonedParts(new Date(), s.location.tz)) : null;
-  $('#skip-btn').hidden = sched.isNew || !s.location;
+  $('#skip-btn').hidden = timingMode || sched.isNew || !s.location;
   $('#skip-btn').textContent = s.skipDates.includes(today) ? '↩︎ Run tonight after all' : '⏭ Skip tonight';
   $('#sched-delete').hidden = sched.isNew;
+  $('#sched-delete').textContent = timingMode ? 'Delete schedule' : `Remove from ${g.name}`;
   // Two schedules on the same evenings would fight over the lights.
-  const clash = groupSchedules(sched.g.id).filter(x => x.id !== s.id).map(x => [x, overlapDays(s, x)]).find(([, n]) => n > 0);
+  const clash = timingMode ? null : groupSchedules(g.id).filter(x => x.id !== s.id).map(x => [x, overlapDays(s, x)]).find(([, n]) => n > 0);
   $('#sched-overlap').hidden = !clash;
   if (clash) {
-    $('#sched-overlap').textContent = `⚠️ Runs on the same evenings as your “${scheduledName(sched.g, clash[0])}” schedule (${clash[1]} days in the next year). Both would change the lights. Pick different days or seasons, or pause one.`;
+    $('#sched-overlap').textContent = `Runs on the same evenings as “${timings[clash[0].timingId]?.name || 'another schedule'}” on ${g.name} (${clash[1]} days in the next year). Both would change the lights. Pick a different schedule, or pause one.`;
   }
   $('#sched-enabled').checked = s.enabled;
 
   // Timer health (only once something is saved)
   const stale = !timerInfo?.lastTick || Date.now() - timerInfo.lastTick > 20 * 60000;
-  $('#timer-warning').hidden = sched.isNew || !timerInfo || (timerInfo.configured && !stale);
+  $('#timer-warning').hidden = timingMode || sched.isNew || !timerInfo || (timerInfo.configured && !stale);
   $('#timer-warning').textContent = !timerInfo?.configured
     ? '⚠️ The schedule timer isn’t set up on the server yet, so this won’t run.'
     : '⏳ Waiting for the schedule timer to check in (it runs every 5 minutes).';
@@ -1913,6 +2098,35 @@ function renderTimeline() {
     : `Fading on ${t(preview.fadeInStart)} → fully on ${t(preview.fullOn)}${preview.sunset && s.on.mode === 'sunset' && !s.on.offsetMin ? ' (sunset)' : ''}. Fading off ${t(preview.fadeOutStart)} → off by ${t(preview.offAt)}.`;
 }
 
+// A group's schedule: which library schedule it follows.
+function renderWhenPicker() {
+  const { s } = sched;
+  const t = timings[s.timingId];
+  const btn = $('#sched-when');
+  btn.setAttribute('aria-expanded', String(sched.pickingWhen));
+  btn.replaceChildren(
+    el('span', { class: 'sched-badge', 'aria-hidden': 'true' }, icon('schedule')),
+    el('span', { class: 'grow' }, el('strong', { text: t?.name || 'Choose a schedule' }), el('span', { class: 'muted small', text: t ? timingSummary(t) : '' })),
+    el('span', { class: 'chev', text: '›' }));
+  const others = t ? groupsUsing(t.id).filter(n => n !== sched.g.name) : [];
+  $('#sched-when-note').textContent = others.length ? `Also used by ${others.join(', ')}` : 'Times are shared from the Library';
+  $('#sched-edit-times').hidden = !t;
+  const list = $('#sched-when-list');
+  list.hidden = !sched.pickingWhen;
+  if (!sched.pickingWhen) { list.replaceChildren(); return; }
+  list.replaceChildren(
+    ...Object.values(timings).sort((a, b) => a.name.localeCompare(b.name)).map(x => el('button', {
+      class: 'pick-option' + (x.id === s.timingId ? ' active' : ''), role: 'radio', 'aria-checked': String(x.id === s.timingId),
+      onclick: () => { sched.pickingWhen = false; setSched({ timingId: x.id, ...timesOf(x) }); },
+    },
+    el('span', { class: 'grow' }, el('strong', { text: x.name }), el('span', { class: 'muted small', text: timingSummary(x) })),
+    el('span', { class: 'check', text: x.id === s.timingId ? '✓' : '' }))),
+    el('button', { class: 'pick-option new', onclick: () => {
+      if (JSON.stringify(sched.s) !== sched.start && !confirm('Leave this screen without saving?')) return;
+      openTiming(null, { thenUseFor: sched.g });
+    } }, el('span', { class: 'grow' }, el('strong', { text: '+ New schedule' }), el('span', { class: 'muted small', text: 'Saved to the Library' }))));
+}
+
 function setSched(change) {
   Object.assign(sched.s, change);
   renderSchedule();
@@ -1947,9 +2161,41 @@ async function refreshSchedulesUsing(patternId) {
 }
 const schedulesUsing = patternId => allSchedules().filter(s => s.pattern.source === 'saved' && s.pattern.id === patternId);
 
+// A library schedule: save it, and every group using it follows.
+async function saveTiming() {
+  const { s } = sched;
+  const name = s.name.trim();
+  if (!name) { $('#sched-name').focus(); showActivity('Give the schedule a name.', 'err'); return; }
+  const btn = $('#sched-save');
+  btn.disabled = true;
+  try {
+    const res = await server('PUT', `timings/${house.key}/${s.id}`, { timing: { name, ...timesOf(s) } });
+    timings[res.timing.id] = res.timing;
+    for (const x of res.schedules || []) upsertSchedule(x);
+    const n = res.schedules?.length || 0;
+    showActivity(`✓ Saved “${res.timing.name}”${n ? ` · ${n} group${n === 1 ? '' : 's'} updated` : ''}`, 'ok');
+    if (sched.thenUseFor) {
+      // Made from a group's card: go straight on to add it to that group.
+      const g = sched.thenUseFor;
+      sched = null;
+      return openSchedule(g, null, { timingId: res.timing.id });
+    }
+    sched.s = { ...sched.s, ...clone(res.timing) };
+    sched.isNew = false;
+    sched.start = JSON.stringify(sched.s);
+    renderSchedule();
+  } catch (e) {
+    showActivity(e.message, 'err');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 async function saveSchedule() {
+  if (sched.mode === 'timing') return saveTiming();
   const { g, s } = sched;
   if (!s.location) { alert('Add the house location first, so the app knows when sunset is.'); return; }
+  if (!s.timingId) { showActivity('Choose a schedule first.', 'err'); return; }
   const body = { ...s, pattern: { ...s.pattern, ...scheduleSnapshot(g, s.pattern) } };
   const btn = $('#sched-save');
   btn.disabled = true;
@@ -2005,10 +2251,10 @@ function importFromHash() {
     const d = JSON.parse(b64urlDecode(m[1]));
     const valid = x => x && typeof x.c === 'string' && x.c.length < 60 && typeof x.b === 'number';
     if (typeof d.n !== 'string' || !Array.isArray(d.l) || !d.l.length || !d.l.every(valid) || (d.c && !d.c.every(valid))) throw 0;
-    if (!confirm(`Add the shared pattern “${d.n}” to your patterns?`)) return;
+    if (!confirm(`Add the shared pattern “${d.n}” to the ${house?.name || 'house'} library?`)) return;
     saved.push({ id: `p-${Date.now().toString(36)}`, name: d.n.slice(0, 40), loop: d.l, cells: d.c, effect: legacyEffect(normalizeMotion(d.e, d.m || {})), motion: normalizeMotion(d.e, d.m || {}) });
-    saveUserPrefs();
-    showActivity(`✓ Added “${d.n}” to your patterns`, 'ok');
+    saveLibrary();
+    showActivity(`✓ Added “${d.n}” to the library`, 'ok');
   } catch {
     showActivity('That pattern link looks broken.', 'err');
   }
@@ -2018,6 +2264,13 @@ function importFromHash() {
 
 function show(screen) {
   for (const s of ['auth', 'main', 'library', 'group', 'maker', 'sched']) $(`#${s}`).hidden = screen !== s;
+  // The tab bar sits under the two top-level places: Home and the Library.
+  const tabs = screen === 'main' || (screen === 'library' && libView?.mode === 'browse');
+  $('#tabbar').hidden = !tabs;
+  document.body.classList.toggle('has-tabbar', tabs);
+  for (const [id, here] of [['#tab-home', screen === 'main'], ['#tab-library', screen === 'library']]) {
+    if (here) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
+  }
 }
 
 async function loadLights() {
@@ -2192,10 +2445,9 @@ async function boot() {
   houses = data.houses;
   try {
     const p = await server('GET', 'prefs/user');
-    saved = Array.isArray(p.prefs.patterns) ? p.prefs.patterns : [];
-    favColors = Array.isArray(p.prefs.colors) ? p.prefs.colors : defaultFavorites();
-    collapsedGroups = p.prefs.collapsed && typeof p.prefs.collapsed === 'object' ? p.prefs.collapsed : {};
-  } catch { saved = []; favColors = defaultFavorites(); }
+    personal = p.prefs || {};
+    collapsedGroups = personal.collapsed && typeof personal.collapsed === 'object' ? personal.collapsed : {};
+  } catch { personal = {}; }
   if (!houses.length) {
     return showAuth('notready', me.admin
       ? 'No houses are set up yet. Add a LIFX_TOKEN_… environment variable in Vercel, then redeploy.'
@@ -2204,6 +2456,24 @@ async function boot() {
   const last = local.get('active');
   await setActive(houses.find(h => h.key === last) || houses[0]);
   importFromHash();
+}
+
+// A house's library. The first time a library is opened, it starts with the
+// patterns and colors this person saved before libraries existed (once only).
+function loadLibrary(lib) {
+  if (Array.isArray(lib?.patterns)) {
+    saved = lib.patterns;
+    favColors = Array.isArray(lib.colors) ? lib.colors : defaultFavorites();
+    return;
+  }
+  const mine = !personal.migrated;
+  saved = mine && Array.isArray(personal.patterns) ? structuredClone(personal.patterns) : [];
+  favColors = mine && Array.isArray(personal.colors) ? structuredClone(personal.colors) : defaultFavorites();
+  saveLibrary();
+  if (mine && (personal.patterns?.length || personal.colors)) {
+    personal = { ...personal, migrated: true };
+    saveUserPrefs();
+  }
 }
 
 async function setActive(h) {
@@ -2216,25 +2486,31 @@ async function setActive(h) {
   identifySnapshot = null;
   ui.tab = {};
   ui.editColors = null;
-  library = null;
+  libView = null;
   groupScreen = null;
   groupPrefs = {};
   houseLocation = null;
+  saved = [];
+  favColors = defaultFavorites();
+  timings = {};
   show('main');
   $('#status').textContent = '';
   $('#house-name').textContent = h.name;
   $('#groups').replaceChildren();
   schedules = {};
   try {
-    const [p, sc] = await Promise.all([
+    const [p, sc, lib] = await Promise.all([
       server('GET', `prefs/house/${h.key}`),
       server('GET', `schedules/${h.key}`),
+      server('GET', `prefs/library/${h.key}`),
     ]);
     if (house !== h) return; // switched again meanwhile
     groupPrefs = p.prefs.groups || {};
     houseLocation = p.prefs.location || null;
+    loadLibrary(lib.prefs);
     schedules = {};
     for (const x of sc.schedules) upsertSchedule(x);
+    timings = Object.fromEntries((sc.timings || []).map(t => [t.id, t]));
     // Houses set up before the location was kept with the house: take it from a schedule.
     if (!houseLocation && sc.schedules.some(x => x.location)) {
       houseLocation = sc.schedules.find(x => x.location).location;
@@ -2285,6 +2561,9 @@ function openHouses() {
   $('#invite-form').hidden = true;
   $('#invite-result').hidden = true;
   $('#app-version').textContent = `App version ${APP_VERSION}`;
+  $('#this-house').hidden = demo;
+  $('#house-loc-text').textContent = locationText(houseLocation);
+  $('#house-loc-btn').textContent = houseLocation ? 'Update' : 'Set';
   $('#settings').showModal();
   $('#timer-status').hidden = true;
   if (!demo && me?.admin) { loadFamily(); loadTimerStatus(); }
@@ -2450,7 +2729,14 @@ $('#cs-close').addEventListener('click', closeColorSheet);
 $('#sheet-scrim').addEventListener('click', closeColorSheet);
 
 // Library and group settings
-$('#library-back').addEventListener('click', () => { library = null; show('main'); renderMain(); });
+$('#library-back').addEventListener('click', () => { libView = null; show('main'); renderMain(); });
+document.querySelectorAll('#library-seg button').forEach(b => b.addEventListener('click', () => {
+  libView.seg = b.dataset.seg;
+  libView.editColors = false;
+  renderLibrary();
+}));
+$('#tab-home').addEventListener('click', () => { libView = null; show('main'); renderMain(); window.scrollTo(0, 0); });
+$('#tab-library').addEventListener('click', () => openLibraryTab());
 $('#collapse-all').addEventListener('click', () => {
   const gids = getGroups().map(g => g.id);
   setCollapsed(gids, !gids.every(isCollapsed));
@@ -2504,7 +2790,7 @@ $('#maker-save').addEventListener('click', () => {
   const pt = makerPattern();
   const i = saved.findIndex(p => p.id === pt.id);
   if (i >= 0) saved[i] = pt; else saved.push(pt);
-  saveUserPrefs();
+  saveLibrary();
   maker.editingId = pt.id;
   maker.savedState = editState();
   renderMaker();
@@ -2523,7 +2809,7 @@ $('#maker-delete').addEventListener('click', () => {
     : '';
   if (!pt || !confirm(`Delete the pattern “${pt.name}”?${warning}`)) return;
   saved = saved.filter(p => p.id !== pt.id);
-  saveUserPrefs();
+  saveLibrary();
   showActivity(`Deleted “${pt.name}”`, 'ok');
   closeMaker(true);
 });
@@ -2556,27 +2842,40 @@ $('#season-on').addEventListener('change', e => {
   const md = v => v && v.slice(5);
   if (md($('#season-from').value) && md($('#season-to').value)) setSched({ season: { from: md($('#season-from').value), to: md($('#season-to').value) } });
 }));
-$('#loc-btn').addEventListener('click', () => {
+// The house's location (for sunset), asked for once and kept with the house.
+function useMyLocation(btn, done) {
   if (!navigator.geolocation) return alert('This browser can’t share its location.');
-  $('#loc-btn').disabled = true;
+  btn.disabled = true;
   navigator.geolocation.getCurrentPosition(pos => {
-    $('#loc-btn').disabled = false;
-    const location = {
+    btn.disabled = false;
+    houseLocation = {
       lat: Math.round(pos.coords.latitude * 100) / 100,
       lon: Math.round(pos.coords.longitude * 100) / 100,
       tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
     };
-    // Kept with the house, so no schedule here has to ask again.
-    houseLocation = location;
     saveGroupPrefs();
-    setSched({ location });
+    updateScheduleLocations();
+    done(houseLocation);
   }, err => {
-    $('#loc-btn').disabled = false;
+    btn.disabled = false;
     alert(err.code === 1
       ? 'Location is turned off for this app. Allow it in Settings › Privacy & Security › Location Services › Safari Websites, then try again.'
       : 'Couldn’t get your location. Please try again.');
   }, { enableHighAccuracy: false, timeout: 15000, maximumAge: 600000 });
-});
+}
+
+// Schedules keep a copy of the house location (the server runs them); bring them up to date.
+async function updateScheduleLocations() {
+  for (const s of allSchedules()) {
+    if (JSON.stringify(s.location) === JSON.stringify(houseLocation)) continue;
+    try { upsertSchedule((await server('PUT', `schedules/${house.key}/${s.id}`, { schedule: { ...s, location: houseLocation } })).schedule); } catch { /* next save fixes it */ }
+  }
+}
+
+const locationText = loc => (loc ? `Sunset times for ${loc.lat.toFixed(2)}, ${loc.lon.toFixed(2)} (${loc.tz.replace(/_/g, ' ')})` : 'Not set yet. Needed to work out sunset.');
+
+$('#loc-btn').addEventListener('click', () => useMyLocation($('#loc-btn'), location => setSched({ location })));
+$('#house-loc-btn').addEventListener('click', () => useMyLocation($('#house-loc-btn'), () => { $('#house-loc-text').textContent = locationText(houseLocation); }));
 $('#skip-btn').addEventListener('click', async () => {
   const s = sched.s;
   const today = core.ymd(core.zonedParts(new Date(), s.location.tz));
@@ -2584,13 +2883,36 @@ $('#skip-btn').addEventListener('click', async () => {
   await saveSchedule();
 });
 $('#sched-delete').addEventListener('click', async () => {
-  if (!confirm('Delete this schedule? Your lights won’t change on their own any more.')) return;
+  const { s, mode, g } = sched;
+  if (mode === 'timing') {
+    const used = groupsUsing(s.id);
+    if (!confirm(`Delete “${s.name}” from the Library?${used.length ? ` It will also stop on ${used.join(', ')}.` : ''}`)) return;
+    try {
+      const res = await server('DELETE', `timings/${house.key}/${s.id}`);
+      delete timings[s.id];
+      for (const id of res.removed || []) removeSchedule(allSchedules().find(x => x.id === id));
+      showActivity(`Deleted “${s.name}”`, 'ok');
+      closeSchedule(true);
+    } catch (e) { showActivity(e.message, 'err'); }
+    return;
+  }
+  if (!confirm(`Remove this schedule from ${g.name}? It stays in the Library for other groups.`)) return;
   try {
-    await server('DELETE', `schedules/${house.key}/${sched.s.id}`);
-    removeSchedule(sched.s);
-    showActivity('Schedule deleted', 'ok');
+    await server('DELETE', `schedules/${house.key}/${s.id}`);
+    removeSchedule(s);
+    showActivity(`Removed from ${g.name}`, 'ok');
     closeSchedule(true);
   } catch (e) { showActivity(e.message, 'err'); }
+});
+$('#sched-name').addEventListener('input', e => { sched.s.name = e.target.value.slice(0, 40); renderSchedule(); });
+$('#sched-when').addEventListener('click', () => { sched.pickingWhen = !sched.pickingWhen; renderWhenPicker(); });
+$('#sched-edit-times').addEventListener('click', () => {
+  const t = timings[sched.s.timingId];
+  if (!t) return;
+  if (JSON.stringify(sched.s) !== sched.start && !confirm('Leave this screen without saving?')) return;
+  const back = { g: sched.g, id: sched.isNew ? null : sched.s.id };
+  openTiming(t);
+  sched.returnToUse = back;
 });
 
 document.addEventListener('visibilitychange', () => {
