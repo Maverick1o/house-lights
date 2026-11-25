@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-15">
+  <meta name="app-version" content="2026.11.24-16">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-15">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-16">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -198,7 +198,7 @@
     </div>
 
     <div class="row maker-extra">
-      <button id="maker-share" class="small" hidden>📤 Share with family</button>
+      <button id="maker-share" class="small" hidden>Send to another house</button>
       <button id="maker-delete" class="small danger" hidden>Delete pattern</button>
     </div>
 
@@ -383,6 +383,15 @@
     </div>
   </div>
 
+  <!-- Send a pattern to another house -->
+  <dialog id="send-dialog" aria-labelledby="send-title">
+    <h2 id="send-title">Send pattern</h2>
+    <p class="muted small">They’ll get their own copy in their Library. Changes you make later won’t affect theirs.</p>
+    <div id="send-houses" class="house-list"></div>
+    <button id="send-link" class="link small">Or share a link instead</button>
+    <button id="send-cancel">Cancel</button>
+  </dialog>
+
   <!-- Houses & family -->
   <dialog id="settings">
     <h2>Houses</h2>
@@ -423,6 +432,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-15"></script>
+  <script src="app.js?v=2026.11.24-16"></script>
 </body>
 </html>

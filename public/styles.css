@@ -542,3 +542,31 @@ body.has-tabbar { padding-bottom: calc(env(safe-area-inset-bottom) + 92px); }
 #library.browse .title-btn { align-items: flex-start; padding: 0; }
 #library.browse #library-title { font-size: 30px; font-weight: 700; letter-spacing: -.02em; }
 #library.browse #library-sub { font-size: 13px; }
+
+/* ---------- Sharing between houses, hiding built-ins ---------- */
+.pill { min-height: 32px; padding: 5px 14px; border-radius: 16px; font-size: 14px; font-weight: 600; background: var(--fill-2); flex: none; }
+.pill.primary { background: var(--tint); color: #fff; }
+.lib-row .pill { margin-right: 12px; }
+.lib-play.static { cursor: default; }
+.lib-row.shared { flex-wrap: wrap; }
+.lib-row.shared .lib-play { flex: 1 1 100%; padding-bottom: 4px; }
+.shared-actions { display: flex; gap: 8px; justify-content: flex-end; width: 100%; padding: 0 0 12px; }
+.shared-actions .pill { margin-right: 0; }
+.shared-actions .pill:last-child { margin-right: 14px; }
+.lib-tools { margin: 0 4px 10px; min-height: 28px; }
+.show-hidden { display: block; margin: 16px auto 0; }
+.inbox-banner {
+  background: linear-gradient(var(--tint-soft), var(--tint-soft)), var(--card);
+  border-radius: 20px; padding: 16px; margin-bottom: 18px; box-shadow: inset 0 0 0 1px rgba(10, 132, 255, .35);
+}
+.inbox-top { display: flex; align-items: center; gap: 14px; }
+.inbox-top .grow { display: flex; flex-direction: column; gap: 2px; }
+.inbox-top strong { font-size: 16px; font-weight: 600; }
+.inbox-actions { display: flex; gap: 10px; margin-top: 14px; }
+.inbox-actions button { flex: 1; }
+.inbox-actions button:not(.primary) { background: var(--fill); }
+.tab { position: relative; }
+.tab.badged::after { content: ''; position: absolute; top: 4px; left: calc(50% + 8px); width: 9px; height: 9px; border-radius: 50%; background: var(--danger); border: 2px solid #161618; }
+#send-dialog .house-item { display: flex; justify-content: space-between; align-items: center; width: 100%; }
+#send-dialog .link { display: block; width: auto; margin: 12px auto 0; }
+.lib-row:has(> .pill) .lib-play .chev { display: none; }

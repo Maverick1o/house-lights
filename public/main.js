@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-15';
-import * as P from './shared/patterns.js?v=2026.11.24-15';
-import * as core from './shared/schedule-core.js?v=2026.11.24-15';
+} from './shared/patterns.js?v=2026.11.24-16';
+import * as P from './shared/patterns.js?v=2026.11.24-16';
+import * as core from './shared/schedule-core.js?v=2026.11.24-16';
 
-const APP_VERSION = '2026.11.24-15';
+const APP_VERSION = '2026.11.24-16';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -49,6 +49,9 @@ let groupPrefs = {};      // per-group settings for the current house (synced)
 let saved = [];           // the house's own patterns (synced)
 let favColors = [];       // the house's quick-pick colors (synced)
 let timings = {};         // id -> library schedule (when it runs), for the current house
+let hiddenIds = new Set(); // built-in patterns this house has hidden (synced with the library)
+let inbox = [];           // patterns other houses sent here, waiting to be added or declined
+let allHouses = [];       // every house's name, to send patterns to
 let personal = {};        // this person's own settings ({ patterns, colors } from before the library, collapsed, migrated)
 let collapsedGroups = {}; // houseKey -> [groupId…] this person keeps collapsed (synced)
 let houseLocation = null; // { lat, lon, tz } of the current house, rounded to ~1 km (synced)
@@ -90,7 +93,8 @@ function flushSync(only) {
 // House settings: each group's settings, plus where the house is (for sunset).
 const saveGroupPrefs = () => house && syncLater(`prefs/house/${house.key}`, { groups: structuredClone(groupPrefs), location: houseLocation });
 const saveUserPrefs = () => syncLater('prefs/user', { ...structuredClone(personal), collapsed: structuredClone(collapsedGroups) });
-const saveLibrary = () => house && syncLater(`prefs/library/${house.key}`, { patterns: structuredClone(saved), colors: structuredClone(favColors) });
+const saveLibrary = () => house && syncLater(`prefs/library/${house.key}`, { patterns: structuredClone(saved), colors: structuredClone(favColors), hidden: [...hiddenIds] });
+const isHidden = pt => !!pt && !isSavedId(pt.id) && hiddenIds.has(pt.id);
 
 // ---------- Talking to the backend ----------
 
@@ -633,7 +637,7 @@ function renderMain() {
   const allCollapsed = groups.every(g => isCollapsed(g.id));
   $('#collapse-all').hidden = groups.length < 2;
   $('#collapse-all').textContent = allCollapsed ? 'Expand all' : 'Collapse all';
-  $('#groups').replaceChildren(...groups.map(groupCard));
+  $('#groups').replaceChildren(...[!demo && inbox.length ? inboxBanner() : null, ...groups.map(groupCard)].filter(Boolean));
 }
 
 // Collapsed groups show only the essentials. Kept per person and per house.
@@ -852,7 +856,7 @@ function topPatterns(g, now) {
   const out = [];
   const add = pt => { if (pt && !out.some(x => x.id === pt.id)) out.push(pt); };
   const find = id => builtinById(id) || saved.find(x => x.id === id);
-  BUILTIN.filter(b => b.category === 'holidays' && inSeason(b, today)).forEach(add);
+  BUILTIN.filter(b => b.category === 'holidays' && inSeason(b, today) && !isHidden(b)).forEach(add);
   for (const id of gp(g.id).recent || []) add(find(id));
   saved.slice(-4).reverse().forEach(add);
   if (out.length < 4) add(builtinById('b-warm'));
@@ -1147,8 +1151,24 @@ function libraryPatterns(g) {
       }, '✎'));
   };
   const today = new Date();
+  const editing = !g && !!libView.editPatterns;
+  // In edit mode built-ins get Hide (or Show, when hidden).
+  const withHide = (pt, node) => {
+    if (!editing || isSavedId(pt.id)) return node;
+    node.append(el('button', {
+      class: 'pill', 'aria-label': `${isHidden(pt) ? 'Show' : 'Hide'} ${pt.name}`,
+      onclick: () => { if (isHidden(pt)) hiddenIds.delete(pt.id); else hiddenIds.add(pt.id); saveLibrary(); renderLibrary(); },
+    }, isHidden(pt) ? 'Show' : 'Hide'));
+    return node;
+  };
+  const visible = pt => !isHidden(pt);
   const out = [
-    pg && el('button', { class: 'lib-new', onclick: () => openMaker(pg.id, null, { from: 'library' }) },
+    !g && inbox.length && el('h3', { text: 'Shared with you' }),
+    !g && inbox.length && el('div', { class: 'lib-list' }, ...inbox.map(sharedRow)),
+    !g && el('div', { class: 'section-head-row lib-tools' },
+      el('span', { class: 'muted small', text: hiddenIds.size ? `${hiddenIds.size} hidden` : '' }),
+      el('button', { class: 'link small strong', onclick: () => { libView.editPatterns = !editing; renderLibrary(); } }, editing ? 'Done' : 'Edit')),
+    pg && !editing && el('button', { class: 'lib-new', onclick: () => openMaker(pg.id, null, { from: 'library' }) },
       el('span', { class: 'lib-new-icon', 'aria-hidden': 'true' }, '+'),
       el('span', { class: 'grow' }, el('strong', { text: 'New pattern' }), el('span', { class: 'muted small', text: 'Your own colors, spacing and motion' }))),
   ];
@@ -1158,12 +1178,17 @@ function libraryPatterns(g) {
     if (note) out.push(el('p', { class: 'muted small lib-note', text: note }));
   };
   section(`${house?.name || 'House'} patterns`, [...saved].reverse().map(pt => row(pt, '')));
-  section('In season now', BUILTIN.filter(b => inSeason(b, today)).map(pt => row(pt, seasonText(pt))));
+  section('In season now', BUILTIN.filter(b => inSeason(b, today) && visible(b)).map(pt => withHide(pt, row(pt, seasonText(pt)))));
   for (const c of CATEGORIES) {
-    section(c.name, BUILTIN.filter(b => b.category === c.id && !(c.id === 'holidays' && inSeason(b, today))).map(pt => row(pt, c.id === 'holidays' ? seasonText(pt) : '')),
+    section(c.name, BUILTIN.filter(b => b.category === c.id && visible(b) && !(c.id === 'holidays' && inSeason(b, today))).map(pt => withHide(pt, row(pt, c.id === 'holidays' ? seasonText(pt) : ''))),
       c.id === 'cozy' ? 'Moods use the colors of the LIFX app’s Moods, blended smoothly along your lights.' : '');
   }
-  if (!g) out.push(el('p', { class: 'muted small lib-note', text: 'Built-in patterns can’t be changed, but you can make your own version of any repeating one.' }));
+  const hidden = BUILTIN.filter(isHidden);
+  if (!g && hidden.length) {
+    if (libView.showHidden || editing) section('Hidden', hidden.map(pt => withHide(pt, row(pt, 'Hidden'))));
+    else out.push(el('button', { class: 'link small show-hidden', onclick: () => { libView.showHidden = true; renderLibrary(); } }, `Show ${hidden.length} hidden pattern${hidden.length === 1 ? '' : 's'}`));
+  }
+  if (!g) out.push(el('p', { class: 'muted small lib-note', text: editing ? 'Hidden patterns stay out of the Color tab and the Library. You can show them again any time.' : 'Built-in patterns can’t be changed, but you can make your own version of any repeating one.' }));
   return out;
 }
 
@@ -1874,6 +1899,7 @@ function patternOptions(g) {
     opts.push({ ref: { source: 'saved', id: pt.id, name: pt.name }, label: `⭐ ${pt.name}`, cells: patternCells(pt, g.id, n), group: 'Your patterns', motion: patternMotion(pt) });
   }
   for (const pt of BUILTIN) {
+    if (isHidden(pt) && !(ref.source === 'builtin' && ref.id === pt.id)) continue;
     opts.push({ ref: { source: 'builtin', id: pt.id, name: pt.name }, label: pt.name, cells: patternCells(pt, g.id, n), group: 'Built in' });
   }
   return opts;
@@ -2230,6 +2256,83 @@ function b64urlDecode(s) {
   return new TextDecoder().decode(Uint8Array.from(bin, ch => ch.charCodeAt(0)));
 }
 
+// ----- Sending a pattern to another house -----
+// The other house gets it in "Shared with you" and keeps its own copy.
+
+function openSendDialog(pt) {
+  const others = allHouses.filter(h => h.key !== house?.key);
+  const dlg = $('#send-dialog');
+  $('#send-title').textContent = `Send “${pt.name}”`;
+  $('#send-houses').replaceChildren(...(others.length ? others.map(h => el('button', {
+    class: 'house-item',
+    onclick: async () => {
+      dlg.close();
+      try {
+        await server('POST', `shares/${h.key}`, { from: house.key, pattern: pt });
+        showActivity(`✓ Sent to ${h.name}. They’ll find it in their Library.`, 'ok');
+      } catch (e) { showActivity(e.message, 'err'); }
+    },
+  }, el('span', { text: h.name }), el('span', { class: 'chev', 'aria-hidden': 'true' }, '›'))) : [el('p', { class: 'muted small', text: 'There are no other houses set up yet.' })]));
+  $('#send-link').onclick = () => { dlg.close(); sharePattern(pt); };
+  dlg.showModal();
+}
+
+function sharedSub(item) {
+  const days = Math.floor((Date.now() - item.at) / 86400000);
+  return `From ${item.fromName} · ${item.fromHouse}${days ? ` · ${days === 1 ? 'yesterday' : `${days} days ago`}` : ''}`;
+}
+
+function sharedRow(item) {
+  const pg = previewGroup();
+  const cells = pg ? patternCells(item.pattern, pg.id, Math.min(positions(pg.lights, pg.id).length, 60)) : P.patternCells(item.pattern, {}, 40);
+  return el('div', { class: 'lib-row shared' },
+    el('div', { class: 'lib-play static' },
+      previewStrip(cells, 30),
+      el('span', { class: 'grow' }, el('strong', { text: item.pattern.name }), el('span', { class: 'muted small', text: sharedSub(item) }))),
+    el('div', { class: 'shared-actions' },
+      el('button', { class: 'pill', onclick: () => declineShared(item) }, 'Decline'),
+      el('button', { class: 'pill primary', onclick: () => acceptShared(item) }, 'Add')));
+}
+
+function inboxBanner() {
+  const item = inbox[0];
+  const more = inbox.length - 1;
+  const pg = previewGroup();
+  const cells = pg ? patternCells(item.pattern, pg.id, Math.min(positions(pg.lights, pg.id).length, 60)) : null;
+  return el('div', { class: 'inbox-banner', role: 'status' },
+    el('div', { class: 'inbox-top' },
+      previewStrip(cells, 30),
+      el('div', { class: 'grow' },
+        el('strong', { text: `${item.fromName} sent you “${item.pattern.name}”` }),
+        el('span', { class: 'muted small', text: more ? `From ${item.fromHouse} · and ${more} more in the Library` : `From ${item.fromHouse}. Add it to your Library?` }))),
+    el('div', { class: 'inbox-actions' },
+      el('button', { onclick: () => declineShared(item) }, 'Not now'),
+      el('button', { class: 'primary', onclick: () => acceptShared(item) }, 'Add to Library')));
+}
+
+async function acceptShared(item) {
+  const taken = new Set(saved.map(p => p.name));
+  const name = taken.has(item.pattern.name) ? `${item.pattern.name} (from ${item.fromName})`.slice(0, 40) : item.pattern.name;
+  // Its own copy: changes here don't affect the sender's, and theirs don't reach here.
+  saved.push({ ...clone(item.pattern), name, id: `p-${Date.now().toString(36)}`, effect: legacyEffect(normalizeMotion(item.pattern.motion)) });
+  saveLibrary();
+  flushSync(`prefs/library/${house.key}`);
+  await removeShared(item);
+  showActivity(`✓ Added “${name}” to the Library`, 'ok');
+}
+
+async function declineShared(item) {
+  await removeShared(item);
+  showActivity(`Declined “${item.pattern.name}”`, 'ok');
+}
+
+async function removeShared(item) {
+  inbox = inbox.filter(x => x.id !== item.id);
+  rerender();
+  $('#tab-library').classList.toggle('badged', inbox.length > 0);
+  try { await server('DELETE', `inbox/${house.key}/${item.id}`); } catch (e) { showActivity(e.message, 'err'); }
+}
+
 async function sharePattern(pt) {
   // Leave out the full list when it's just the loop repeated (much shorter link).
   const plain = JSON.stringify(tile(pt.loop, pt.cells.length)) === JSON.stringify(pt.cells);
@@ -2268,6 +2371,7 @@ function show(screen) {
   const tabs = screen === 'main' || (screen === 'library' && libView?.mode === 'browse');
   $('#tabbar').hidden = !tabs;
   document.body.classList.toggle('has-tabbar', tabs);
+  $('#tab-library').classList.toggle('badged', inbox.length > 0);
   for (const [id, here] of [['#tab-home', screen === 'main'], ['#tab-library', screen === 'library']]) {
     if (here) $(id).setAttribute('aria-current', 'page'); else $(id).removeAttribute('aria-current');
   }
@@ -2443,6 +2547,7 @@ async function boot() {
   }
   me = data.user;
   houses = data.houses;
+  allHouses = data.allHouses || data.houses;
   try {
     const p = await server('GET', 'prefs/user');
     personal = p.prefs || {};
@@ -2461,6 +2566,7 @@ async function boot() {
 // A house's library. The first time a library is opened, it starts with the
 // patterns and colors this person saved before libraries existed (once only).
 function loadLibrary(lib) {
+  hiddenIds = new Set(Array.isArray(lib?.hidden) ? lib.hidden : []);
   if (Array.isArray(lib?.patterns)) {
     saved = lib.patterns;
     favColors = Array.isArray(lib.colors) ? lib.colors : defaultFavorites();
@@ -2499,15 +2605,18 @@ async function setActive(h) {
   $('#groups').replaceChildren();
   schedules = {};
   try {
-    const [p, sc, lib] = await Promise.all([
+    const [p, sc, lib, box] = await Promise.all([
       server('GET', `prefs/house/${h.key}`),
       server('GET', `schedules/${h.key}`),
       server('GET', `prefs/library/${h.key}`),
+      server('GET', `inbox/${h.key}`).catch(() => ({ items: [] })),
     ]);
     if (house !== h) return; // switched again meanwhile
     groupPrefs = p.prefs.groups || {};
     houseLocation = p.prefs.location || null;
     loadLibrary(lib.prefs);
+    inbox = box.items || [];
+    $('#tab-library').classList.toggle('badged', inbox.length > 0);
     schedules = {};
     for (const x of sc.schedules) upsertSchedule(x);
     timings = Object.fromEntries((sc.timings || []).map(t => [t.id, t]));
@@ -2800,7 +2909,8 @@ $('#maker-save').addEventListener('click', () => {
     : `✓ Saved “${pt.name}” — it’s in your Patterns`, 'ok');
   if (using.length) { flushSync('prefs/user'); refreshSchedulesUsing(pt.id); }
 });
-$('#maker-share').addEventListener('click', () => sharePattern(makerPattern()));
+$('#maker-share').addEventListener('click', () => openSendDialog(makerPattern()));
+$('#send-cancel').addEventListener('click', () => $('#send-dialog').close());
 $('#maker-delete').addEventListener('click', () => {
   const pt = saved.find(p => p.id === maker.editingId);
   const using = schedulesUsing(pt?.id);

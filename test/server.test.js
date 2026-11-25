@@ -709,3 +709,28 @@ test('a schedule can show a pattern from the house library', async () => {
   assert.deepEqual(lifxCalls.filter(c => c.body?.states).at(-1).body.states.map(s => s.color), ['hue:225 saturation:1']);
 });
 
+test('a pattern sent to another house lands in its inbox as plain data, for that house only', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  const { person: dad } = await invitePerson(app, admin, ['mom_and_dad'], 'Dad');
+  const pattern = { name: "80's Christmas", loop: [{ c: 'hue:0 saturation:1', b: 1 }, { c: 'hue:120 saturation:1', b: 1 }], width: 2, gaps: 'dim', motion: { type: 'chase', speed: 0.4 }, evil: '<script>' };
+  assert.equal((await admin.call('GET', 'me')).body.allHouses.length, 2);
+  assert.equal((await admin.call('POST', 'shares/mom_and_dad', { from: 'home', pattern })).status, 201);
+  assert.equal((await admin.call('POST', 'shares/home', { from: 'home', pattern })).status, 400, 'not to the same house');
+  assert.equal((await admin.call('POST', 'shares/mom_and_dad', { from: 'home', pattern: { name: 'x', loop: [{ c: '<b>', b: 1 }] } })).status, 400);
+  assert.equal((await dad.call('POST', 'shares/mom_and_dad', { from: 'home', pattern })).status, 403, 'can only send from a house you can reach');
+  // Dad can send to a house he can't control.
+  assert.equal((await dad.call('POST', 'shares/home', { from: 'mom_and_dad', pattern })).status, 201);
+
+  const box = await dad.call('GET', 'inbox/mom_and_dad');
+  assert.equal(box.body.items.length, 1);
+  const item = box.body.items[0];
+  assert.equal(item.fromName, 'Kevin');
+  assert.equal(item.pattern.evil, undefined, 'unknown fields are dropped');
+  assert.equal(item.pattern.width, 2);
+  assert.equal(item.pattern.motion.type, 'chase');
+  assert.equal((await dad.call('GET', 'inbox/home')).status, 403);
+  assert.equal((await dad.call('DELETE', `inbox/mom_and_dad/${item.id}`)).status, 200);
+  assert.equal((await dad.call('GET', 'inbox/mom_and_dad')).body.items.length, 0);
+});
+
