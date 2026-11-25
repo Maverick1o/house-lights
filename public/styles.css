@@ -206,7 +206,8 @@ dialog .house-row button.small { width: auto; margin-top: 0; }
 /* ---------- Pattern maker (v2) ---------- */
 .maker-head {
   position: sticky; top: 0; z-index: 16; display: flex; align-items: center; gap: 6px;
-  margin: 0 -16px 12px; padding: calc(env(safe-area-inset-top) + 6px) 12px 8px;
+  /* The page already pads for the notch; pull the header up so it isn't counted twice. */
+  margin: calc(-1 * (env(safe-area-inset-top) + 12px)) -16px 12px; padding: calc(env(safe-area-inset-top) + 6px) 12px 8px;
   background: rgba(17,19,24,.97); border-bottom: 1px solid var(--line);
   backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
 }

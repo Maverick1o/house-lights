@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-11';
-import * as P from './shared/patterns.js?v=2026.11.24-11';
-import * as core from './shared/schedule-core.js?v=2026.11.24-11';
+} from './shared/patterns.js?v=2026.11.24-12';
+import * as P from './shared/patterns.js?v=2026.11.24-12';
+import * as core from './shared/schedule-core.js?v=2026.11.24-12';
 
-const APP_VERSION = '2026.11.24-11';
+const APP_VERSION = '2026.11.24-12';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
