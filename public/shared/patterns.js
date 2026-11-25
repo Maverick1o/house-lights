@@ -205,6 +205,12 @@ const hsb = (h, s, b = 1, k = 3500) => (s < 0.01 ? cell(`kelvin:${k} saturation:
 const holiday = (id, name, loop, seasons) => ({ id, name, loop, seasons, category: 'holidays' });
 // Moods use the colours of the LIFX app's Moods, blended smoothly along the lights.
 const mood = (id, name, category, palette, seasons) => ({ id, name, category, layout: 'blend', loop: palette, seasons });
+// A single smooth sweep across the whole string: [hue, saturation] stops,
+// each a little further round the wheel, no repeats.
+const sweep = (id, name, stops) => {
+  const s = stops.map(([h, sat], i) => ({ c: `hue:${h} saturation:${sat}`, b: 1, pos: i / (stops.length - 1) }));
+  return { id, name, category: 'gradients', layout: 'gradient', stops: s, repeat: 1, style: 'repeat', blend: 'direct', loop: s.map(({ c, b }) => ({ c, b })) };
+};
 // Gradients: stops from #hex, spread evenly unless positions are given; tuned for how LEDs glow.
 const gradient = (id, name, hexes, { repeat = 2, style = 'mirror', blend = 'direct', pos } = {}) => {
   const stops = hexes.map((h, i) => ({ ...hexCell(h), pos: pos ? pos[i] : i / (hexes.length - 1) }));
@@ -262,6 +268,12 @@ export const BUILTIN = [
   gradient('b-g-bloom', '🌺 Midnight bloom', ['#3a1cff', '#a637ff', '#ff4fa3']),
   gradient('b-g-evergreen', '🌲 Evergreen & gold', ['#00b35c', '#9be15d', '#ffd54a'], { repeat: 3 }),
   gradient('b-g-swirl', '🍬 Candy swirl', ['#ff2a4d', '#ffd6de'], { repeat: 6 }),
+  // One long, smooth sweep: each stop a step further round the color wheel.
+  sweep('b-g-dawn', '🌄 Dawn', [[330, 0.55], [345, 0.62], [0, 0.68], [15, 0.74], [30, 0.8], [42, 0.85]]),
+  sweep('b-g-deepsea', '🐋 Deep sea', [[165, 0.75], [180, 0.8], [192, 0.85], [205, 0.88], [218, 0.9], [232, 0.92]]),
+  sweep('b-g-lavender', '💐 Lavender fields', [[240, 0.45], [255, 0.5], [268, 0.55], [281, 0.58], [295, 0.6], [310, 0.55]]),
+  sweep('b-g-goldenhour', '🌇 Golden hour', [[5, 0.9], [16, 0.9], [26, 0.88], [36, 0.86], [46, 0.82], [55, 0.75]]),
+  sweep('b-g-meadow', '🌾 Spring meadow', [[55, 0.75], [68, 0.75], [82, 0.72], [98, 0.7], [118, 0.68], [140, 0.66]]),
 
   { id: 'b-warm', name: '✨ Warm bulbs', loop: [cell(C.Warm)], category: 'basics' },
   { id: 'b-rainbow', name: '🌈 Rainbow', rainbow: true, category: 'basics' },
@@ -392,14 +404,18 @@ export function cellsToStates(pos, cells, level = 1) {
 // What the lights do after a pattern is painted:
 //   { type: 'none' | 'chase' | 'breathe' | 'pulse', dir, speed, to }
 // Older patterns stored just a string ('chase', 'chase-back', …); both work.
-// Speed is a slider from 0 (slowest) to 1 (fastest). It maps to the LIFX
-// "period" (seconds per cycle) on a curve, so every step of the slider feels
-// like a similar change in speed.
+// Speed is a slider from 0 (slowest) to 1 (fastest), mapped on a curve so
+// every step feels like a similar change. The range is wide: from barely
+// drifting to quick.
+//
+// Chase is LIFX's "move" effect, whose period is one full sweep across a
+// strip. Strips of different lengths would then move at different paces, so
+// chase speed is set per light and each strip gets its own period.
 
 const PERIODS = {
-  chase: { slow: 8, fast: 0.3 },     // seconds per step along the strip
-  breathe: { slow: 10, fast: 1 },    // seconds per fade in and out
-  pulse: { slow: 3, fast: 0.25 },    // seconds per blink
+  chase: { slow: 4, fast: 0.02 },    // seconds per light, along the string
+  breathe: { slow: 60, fast: 0.6 },  // seconds per fade down and back
+  pulse: { slow: 6, fast: 0.12 },    // seconds per blink
 };
 const OLD_SPEEDS = { slow: 0.2, medium: 0.5, fast: 0.8 }; // patterns saved before the slider
 export const DEFAULT_TO = 'brightness:0.05';
@@ -423,15 +439,24 @@ export function normalizeMotion(effect, motion = {}) {
 export const patternMotion = p => normalizeMotion(p?.motion || p?.effect, p?.motion);
 export const legacyEffect = mo => (mo.type === 'chase' ? (mo.dir === 'backward' ? 'chase-back' : 'chase') : mo.type);
 
-/** The LIFX effect call for a motion setting, or null for "steady". */
-export function motionRequest(mo) {
-  if (!mo || mo.type === 'none') return null;
-  const period = periodFor(mo.type, mo.speed);
-  if (mo.type === 'chase') return { effect: 'move', body: { direction: mo.dir === 'backward' ? 'backward' : 'forward', period, power_on: true } };
-  if (mo.type === 'breathe' || mo.type === 'pulse') {
-    return { effect: mo.type, body: { color: mo.to || DEFAULT_TO, period, cycles: 100000, persist: false, power_on: true } };
+/**
+ * The LIFX effect calls for a motion setting: [{ selector, effect, body }].
+ * `selector` is the whole set (e.g. a group); `lights` are the lights in it,
+ * so chase can give each strip the period that keeps them all in step.
+ */
+export function motionRequests(mo, selector, lights = []) {
+  if (!mo || mo.type === 'none') return [];
+  if (mo.type === 'chase') {
+    const perLight = periodFor('chase', mo.speed);
+    const body = zones => ({ direction: mo.dir === 'backward' ? 'backward' : 'forward', period: Math.max(0.2, Math.round(perLight * zones * 100) / 100), power_on: true });
+    const strips = lights.filter(isMultizone);
+    if (!strips.length) return [{ selector, effect: 'move', body: body(40) }];
+    return strips.map(l => ({ selector: `id:${l.id}`, effect: 'move', body: body(stripLength(l)) }));
   }
-  return null;
+  if (mo.type === 'breathe' || mo.type === 'pulse') {
+    return [{ selector, effect: mo.type, body: { color: mo.to || DEFAULT_TO, period: periodFor(mo.type, mo.speed), cycles: 100000, persist: false, power_on: true } }];
+  }
+  return [];
 }
 
 // ---------- What a schedule shows ----------

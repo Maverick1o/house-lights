@@ -526,7 +526,7 @@ test('timer fades on by sunset, starts the motion, then fades off — each exact
   lifxCalls.length = 0;
   r = await tickAt(plan.fullOn.getTime() + 60000);
   assert.deepEqual(r.ran.map(x => x.kind), ['motion']);
-  assert.match(lifxCalls[0].url, /effects\/move$/);
+  assert.match(lifxCalls.at(-1).url, /effects\/move$/);
 
   lifxCalls.length = 0;
   r = await tickAt(plan.fadeOutStart.getTime() + 3 * 60000);

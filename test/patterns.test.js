@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  C, cell, BUILTIN, positions, layoutCells, inSeason, gradientCells, gradientAt, gradientSettings, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequest,
+  C, cell, BUILTIN, positions, layoutCells, inSeason, gradientCells, gradientAt, gradientSettings, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequests,
 } from '../public/shared/patterns.js';
 
 const strip = (id, label, count) => ({ id, label, zones: { count }, product: { capabilities: { has_multizone: true } } });
@@ -83,13 +83,13 @@ test('a schedule finds its pattern as it is now', () => {
 test('expanding a pattern gives states in strip order plus its motion', () => {
   const out = expandPattern({ id: 'p-1', name: 'Two', loop: [cell(C.Red), cell(C.Blue)], motion: { type: 'chase', dir: 'backward', speed: 1 } }, [A, B], { order: ['b', 'a'] });
   assert.deepEqual(out.states.map(s => s.selector), ['id:b|0-0', 'id:b|1-1', 'id:a|0-0', 'id:a|1-1', 'id:a|2-2']);
-  assert.deepEqual(motionRequest(out.motion), { effect: 'move', body: { direction: 'backward', period: 0.3, power_on: true } });
+  assert.deepEqual(motionRequests(out.motion, 'group_id:g', [A, B]).map(r => [r.selector, r.effect, r.body.direction]), [['id:a', 'move', 'backward'], ['id:b', 'move', 'backward']]);
 });
 
 test('old motion formats still read correctly', () => {
   assert.equal(normalizeMotion('chase-back').dir, 'backward');
   assert.equal(normalizeMotion('pulse', { speed: 'fast' }).speed, 0.8);
-  assert.equal(motionRequest(normalizeMotion('none')), null);
+  assert.deepEqual(motionRequests(normalizeMotion('none'), 'group_id:g'), []);
 });
 
 const hueOf = c => Number(/hue:(\d+)/.exec(c)?.[1]);
@@ -125,13 +125,39 @@ test('two whites blend by color temperature', () => {
   assert.deepEqual(cells.map(x => x.c), ['kelvin:2700 saturation:0', 'kelvin:4600 saturation:0', 'kelvin:6500 saturation:0']);
 });
 
-test('20 built-in gradients, all valid and lit', () => {
+test('25 built-in gradients, all valid and lit', () => {
   const gradients = BUILTIN.filter(b => b.layout === 'gradient');
-  assert.equal(gradients.length, 20);
+  assert.equal(gradients.length, 25);
   for (const g of gradients) {
     const cells = layoutCells(g, 120);
     assert.equal(cells.length, 120);
     for (const x of cells) assert.ok(x.b > 0.2 && /^(hue:\d+ saturation:[\d.]+|kelvin:\d+ saturation:0)$/.test(x.c), `${g.name}: ${x.c} @ ${x.b}`);
   }
+});
+
+test('chase keeps every strip at the same pace, across a wide speed range', () => {
+  const short = strip('s', 'Short', 15), long = strip('l', 'Long', 75);
+  const slow = motionRequests({ type: 'chase', speed: 0, dir: 'forward' }, 'group_id:g', [short, long]);
+  const [ps, pl] = slow.map(r => r.body.period);
+  assert.equal(pl / ps, 5, 'a strip 5x longer takes 5x longer per sweep, so lights move at the same speed');
+  assert.ok(ps / 15 >= 3, `slowest is a slow drift: ${ps / 15}s per light`);
+  const fast = motionRequests({ type: 'chase', speed: 1, dir: 'forward' }, 'group_id:g', [long])[0].body.period;
+  assert.ok(fast / 75 <= 0.03, 'fastest is quick');
+  const breatheSlow = motionRequests({ type: 'breathe', speed: 0 }, 'group_id:g')[0].body.period;
+  const pulseFast = motionRequests({ type: 'pulse', speed: 1 }, 'group_id:g')[0].body.period;
+  assert.ok(breatheSlow >= 45 && pulseFast <= 0.15);
+});
+
+test('the single-sweep gradients run once across the lights with every stop a different hue', () => {
+  const sweeps = ['b-g-dawn', 'b-g-deepsea', 'b-g-lavender', 'b-g-goldenhour', 'b-g-meadow'].map(id => BUILTIN.find(b => b.id === id));
+  for (const g of sweeps) {
+    assert.equal(g.repeat, 1);
+    assert.equal(g.style, 'repeat');
+    const hues = g.stops.map(s => s.c);
+    assert.equal(new Set(hues).size, hues.length, `${g.name}: no color reused`);
+    const cells = layoutCells(g, 120);
+    assert.notEqual(cells[0].c, cells[119].c, `${g.name}: starts and ends on different colors`);
+  }
+  assert.equal(BUILTIN.filter(b => b.layout === 'gradient').length, 25);
 });
 

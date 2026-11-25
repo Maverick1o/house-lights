@@ -17,13 +17,13 @@
  */
 import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
-  normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
+  normalizeMotion, patternMotion, legacyEffect, motionRequests, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-18';
-import * as P from './shared/patterns.js?v=2026.11.24-18';
-import * as core from './shared/schedule-core.js?v=2026.11.24-18';
+} from './shared/patterns.js?v=2026.11.24-19';
+import * as P from './shared/patterns.js?v=2026.11.24-19';
+import * as core from './shared/schedule-core.js?v=2026.11.24-19';
 
-const APP_VERSION = '2026.11.24-18';
+const APP_VERSION = '2026.11.24-19';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -307,9 +307,9 @@ async function sendStates(states, what) {
   }
 }
 
-function startMotion(selector, mo) {
-  const req = motionRequest(mo);
-  return req && api('POST', `/lights/${enc(selector)}/effects/${req.effect}`, req.body);
+// Start a motion on a set of lights (each strip gets its own chase period, so they keep pace).
+async function startMotion(selector, mo, lights) {
+  for (const r of motionRequests(mo, selector, lights)) await api('POST', `/lights/${enc(r.selector)}/effects/${r.effect}`, r.body);
 }
 
 // Paint cells along a set of strips, then optionally start the motion.
@@ -320,7 +320,7 @@ async function paint(selector, pos, cells, level, effect = 'none') {
   const mo = normalizeMotion(effect);
   if (mo.type !== 'none') {
     step(`starting ${mo.type}…`);
-    await startMotion(selector, mo);
+    await startMotion(selector, mo, [...new Set(pos.map(p => p.light))]);
   }
 }
 
@@ -934,7 +934,7 @@ function motionTab(g, now) {
   const mo = normalizeMotion(now?.effect);
   const apply = (next, label) => run(`${label} · ${g.name}`, async () => {
     await effectsOff(sel);
-    if (next.type !== 'none') await startMotion(sel, next);
+    if (next.type !== 'none') await startMotion(sel, next, g.lights);
     setLastMotion(g, next, now);
   });
   const state = mo.type === 'none' ? 'Steady' : `${MOTION_NAME[mo.type]}, ${speedWord(mo.speed)}`;
