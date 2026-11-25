@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-16';
-import * as P from './shared/patterns.js?v=2026.11.24-16';
-import * as core from './shared/schedule-core.js?v=2026.11.24-16';
+} from './shared/patterns.js?v=2026.11.24-17';
+import * as P from './shared/patterns.js?v=2026.11.24-17';
+import * as core from './shared/schedule-core.js?v=2026.11.24-17';
 
-const APP_VERSION = '2026.11.24-16';
+const APP_VERSION = '2026.11.24-17';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -526,7 +526,7 @@ function kelvinCss(k) {
 
 function hsbCss({ hue = 0, saturation = 0, kelvin = 3500 }) {
   if (saturation < 0.05) return kelvinCss(kelvin);
-  return `hsl(${hue}, ${Math.round(saturation * 100)}%, ${Math.round(50 + (1 - saturation) * 38)}%)`;
+  return `rgb(${P.hsvToRgb(hue, saturation, 1).map(v => Math.round(v * 255)).join(',')})`;
 }
 const colorCss = c => hsbCss(parseColor(c));
 
@@ -873,7 +873,7 @@ function patternChip(g, pt, now) {
   return el('button', {
     class: 'pattern-chip' + (active ? ' active' : ''), 'aria-pressed': String(active),
     onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)),
-  }, previewStrip(patternCells(pt, g.id, Math.min(n, 48)), 16), el('span', { class: 'chip-name', text: patternLabel(pt.name, pt.id) }));
+  }, previewStrip(patternCells(pt, g.id, Math.min(n, 48)), 16, isSmooth(pt)), el('span', { class: 'chip-name', text: patternLabel(pt.name, pt.id) }));
 }
 
 // ----- Motion: how what's showing moves, changed on the spot -----
@@ -965,9 +965,19 @@ function scheduleRow(g, s) {
 }
 
 // A small strip of color previewing cells (sampled down to fit).
-function previewStrip(cells, max = 36) {
+// Smooth patterns (gradients, moods) preview as one continuous blend.
+function previewStrip(cells, max = 36, smooth = false) {
   const box = el('span', { class: 'preview-strip', 'aria-hidden': 'true' });
   if (!cells?.length) { box.classList.add('unknown'); return box; }
+  if (smooth) {
+    const n = Math.min(cells.length, 24);
+    const stops = Array.from({ length: n }, (_, i) => {
+      const x = cells[Math.floor((i * (cells.length - 1)) / Math.max(1, n - 1))];
+      return `${x.b > 0 ? cellCss(x) : '#1b1d23'} ${((i / Math.max(1, n - 1)) * 100).toFixed(1)}%`;
+    });
+    box.style.background = `linear-gradient(90deg, ${stops.join(', ')})`;
+    return box;
+  }
   const step = Math.max(1, cells.length / max);
   for (let i = 0; i < cells.length && box.childElementCount < max; i += step) {
     const x = cells[Math.floor(i)];
@@ -1103,6 +1113,8 @@ const seasonText = pt => pt.seasons?.length
   ? pt.seasons.map(([f, t]) => { const a = SEASON_MONTHS[+f.slice(0, 2) - 1], b = SEASON_MONTHS[+t.slice(0, 2) - 1]; return a === b ? a : `${a}–${b}`; }).join(', ')
   : '';
 const canCustomize = pt => !isSavedId(pt.id) && pt.layout !== 'blend';
+const isSmooth = pt => pt?.layout === 'gradient' || pt?.layout === 'blend';
+const mine0 = pt => isSavedId(pt.id);
 
 function renderLibrary() {
   const v = libView;
@@ -1133,15 +1145,15 @@ function libraryPatterns(g) {
   const row = (pt, sub) => {
     const active = !!now && !isSolid(now) && (now.id ? now.id === pt.id : now.name === pt.name);
     const mo = patternMotion(pt);
-    const details = [sub, mo.type !== 'none' && MOTION_NAME[mo.type]].filter(Boolean).join(' · ');
+    const details = [sub, mine0(pt) && isGradient(pt) && 'Gradient', mo.type !== 'none' && MOTION_NAME[mo.type]].filter(Boolean).join(' · ');
     const mine = isSavedId(pt.id);
-    const edit = () => pg && openMaker(pg.id, pt, { from: 'library', copy: !mine });
+    const edit = () => pg && (isGradient(pt) ? openGradient : openMaker)(pg.id, pt, { from: 'library', copy: !mine });
     const play = g
       ? () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)).then(() => { if (libView) renderLibrary(); })
       : mine || canCustomize(pt) ? edit : null;
     return el('div', { class: 'lib-row' + (active ? ' active' : '') },
       el('button', { class: 'lib-play', 'aria-pressed': g ? String(active) : null, disabled: !play, onclick: play },
-        previewStrip(cellsFor(pt), 30),
+        previewStrip(cellsFor(pt), 30, isSmooth(pt)),
         el('span', { class: 'grow' }, el('strong', { text: patternLabel(pt.name, pt.id) }), details && el('span', { class: 'muted small', text: details })),
         active && el('span', { class: 'check', text: '✓' }),
         !g && play && el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
@@ -1168,7 +1180,7 @@ function libraryPatterns(g) {
     !g && el('div', { class: 'section-head-row lib-tools' },
       el('span', { class: 'muted small', text: hiddenIds.size ? `${hiddenIds.size} hidden` : '' }),
       el('button', { class: 'link small strong', onclick: () => { libView.editPatterns = !editing; renderLibrary(); } }, editing ? 'Done' : 'Edit')),
-    pg && !editing && el('button', { class: 'lib-new', onclick: () => openMaker(pg.id, null, { from: 'library' }) },
+    pg && !editing && el('button', { class: 'lib-new', onclick: () => newPattern(pg.id) },
       el('span', { class: 'lib-new-icon', 'aria-hidden': 'true' }, '+'),
       el('span', { class: 'grow' }, el('strong', { text: 'New pattern' }), el('span', { class: 'muted small', text: 'Your own colors, spacing and motion' }))),
   ];
@@ -1317,9 +1329,11 @@ function openMaker(gid, pattern, opts = {}) {
   const spacing = spacingOf(pattern);
   maker = {
     gid, n, seq, ...spacing,
-    overrides: isSaved ? overridesFor(pattern, seq, n) : {},
+    overrides: isSaved || opts.keepCells ? overridesFor(pattern, seq, n) : {},
     motion: patternMotion(pattern),
-    name: isSaved ? pattern.name : opts.copy ? `${pattern.name.replace(/^\p{Extended_Pictographic}\uFE0F?\s*/u, '')} (mine)`.slice(0, 40) : '',
+    name: isSaved || opts.keepCells ? pattern.name : opts.copy ? `${pattern.name.replace(/^\p{Extended_Pictographic}\uFE0F?\s*/u, '')} (mine)`.slice(0, 40) : '',
+    // Converted from a gradient: every light is its own color, so don't mark them as "changed".
+    painted: !!opts.keepCells || !!pattern?.painted,
     editingId: isSaved ? pattern.id : null,
     from: opts.from || maker?.from || null,
     sel: null, // { kind: 'seq' | 'house', idx: Set } — lights the sheet is editing
@@ -1373,6 +1387,7 @@ function renderMaker() {
     onclick: () => {
       if (p.id === m.editingId) return;
       if (isDirty() && !confirm('Switch patterns without saving your changes?')) return;
+      if (isGradient(p)) { maker = null; openGradient(m.gid, p, { from: m.from || 'library' }); return; }
       openMaker(m.gid, p);
     },
   }, `⭐ ${p.name}`)));
@@ -1479,7 +1494,7 @@ function renderHouse() {
     const row = [];
     for (let k = 0; k < len; k++, i++) {
       const node = cellEl('house', i, cells[i], k + 1);
-      if (m.overrides[i]) node.classList.add('changed');
+      if (m.overrides[i] && !m.painted) node.classList.add('changed');
       row.push(node);
     }
     rows.push(el('div', { class: 'strip-row' },
@@ -1488,7 +1503,7 @@ function renderHouse() {
   }
   $('#house-grid').replaceChildren(...rows);
   const changed = Object.keys(m.overrides).length;
-  $('#overrides-note').hidden = !changed;
+  $('#overrides-note').hidden = !changed || m.painted;
   $('#overrides-count').textContent = `${changed} light${changed === 1 ? '' : 's'} changed by hand (dotted)`;
 }
 
@@ -1696,6 +1711,7 @@ function makerPattern() {
     width: maker.width,
     gaps: maker.gaps,
     overrides: clone(maker.overrides),
+    ...(maker.painted ? { painted: true } : {}),
     cells: makerCells(),
     effect: legacyEffect(maker.motion),
     motion: clone(maker.motion),
@@ -1896,11 +1912,11 @@ function patternOptions(g) {
     });
   }
   for (const pt of saved) {
-    opts.push({ ref: { source: 'saved', id: pt.id, name: pt.name }, label: `⭐ ${pt.name}`, cells: patternCells(pt, g.id, n), group: 'Your patterns', motion: patternMotion(pt) });
+    opts.push({ ref: { source: 'saved', id: pt.id, name: pt.name }, label: `⭐ ${pt.name}`, cells: patternCells(pt, g.id, n), smooth: isSmooth(pt), group: 'House patterns', motion: patternMotion(pt) });
   }
   for (const pt of BUILTIN) {
     if (isHidden(pt) && !(ref.source === 'builtin' && ref.id === pt.id)) continue;
-    opts.push({ ref: { source: 'builtin', id: pt.id, name: pt.name }, label: pt.name, cells: patternCells(pt, g.id, n), group: 'Built in' });
+    opts.push({ ref: { source: 'builtin', id: pt.id, name: pt.name }, label: pt.name, cells: patternCells(pt, g.id, n), smooth: isSmooth(pt), group: 'Built in' });
   }
   return opts;
 }
@@ -1914,8 +1930,8 @@ function renderPatternPicker() {
   const btn = $('#sched-pattern');
   btn.setAttribute('aria-expanded', String(sched.picking));
   btn.replaceChildren(
-    previewStrip(chosen.cells),
-    el('span', { class: 'grow' }, el('strong', { text: chosen.label }), el('span', { class: 'muted small', text: chosen.sub || (chosen.group === 'Your patterns' ? 'Your pattern' : chosen.group) || '' })),
+    previewStrip(chosen.cells, 36, chosen.smooth),
+    el('span', { class: 'grow' }, el('strong', { text: chosen.label }), el('span', { class: 'muted small', text: chosen.sub || (chosen.group === 'House patterns' ? 'House pattern' : chosen.group) || '' })),
     el('span', { class: 'chev', text: '›' }));
   const list = $('#sched-pattern-list');
   list.hidden = !sched.picking;
@@ -1934,7 +1950,7 @@ function renderPatternPicker() {
         $('#sched-pattern').focus();
       },
     },
-    previewStrip(o.cells),
+    previewStrip(o.cells, 36, o.smooth),
     el('span', { class: 'grow' },
       el('strong', { text: o.label }),
       (o.sub || MOTION_TEXT[o.motion?.type]) && el('span', { class: 'muted small', text: o.sub || MOTION_TEXT[o.motion.type] })),
@@ -2287,7 +2303,7 @@ function sharedRow(item) {
   const cells = pg ? patternCells(item.pattern, pg.id, Math.min(positions(pg.lights, pg.id).length, 60)) : P.patternCells(item.pattern, {}, 40);
   return el('div', { class: 'lib-row shared' },
     el('div', { class: 'lib-play static' },
-      previewStrip(cells, 30),
+      previewStrip(cells, 30, isSmooth(item.pattern)),
       el('span', { class: 'grow' }, el('strong', { text: item.pattern.name }), el('span', { class: 'muted small', text: sharedSub(item) }))),
     el('div', { class: 'shared-actions' },
       el('button', { class: 'pill', onclick: () => declineShared(item) }, 'Decline'),
@@ -2366,7 +2382,7 @@ function importFromHash() {
 // ---------- Screens and loading ----------
 
 function show(screen) {
-  for (const s of ['auth', 'main', 'library', 'group', 'maker', 'sched']) $(`#${s}`).hidden = screen !== s;
+  for (const s of ['auth', 'main', 'library', 'group', 'maker', 'grad', 'sched']) $(`#${s}`).hidden = screen !== s;
   // The tab bar sits under the two top-level places: Home and the Library.
   const tabs = screen === 'main' || (screen === 'library' && libView?.mode === 'browse');
   $('#tabbar').hidden = !tabs;
@@ -3030,6 +3046,310 @@ document.addEventListener('visibilitychange', () => {
   if ((house || demo) && !$('#main').hidden) refresh('Checking for changes');
 });
 window.addEventListener('pagehide', () => flushSync());
+
+// ---------- Gradient editor ----------
+// A gradient is a flow of color: stops along a bar, repeated (mirrored or
+// restarting) around the house. You shape the flow; the lights follow. It's
+// saved as a pattern like any other, so it works everywhere patterns do.
+
+let grad = null; // { gid, n, name, editingId, stops, repeat, style, blend, motion, sel, from, start, sent }
+
+const isGradient = pt => pt?.layout === 'gradient';
+const gradState = (m = grad) => JSON.stringify({ name: m.name, stops: m.stops, repeat: m.repeat, style: m.style, blend: m.blend, motion: m.motion });
+const gradDirty = () => !!grad && gradState() !== grad.start;
+
+function openGradient(gid, pattern, opts = {}) {
+  const g = groupById(gid);
+  if (!g) return;
+  const mine = !!pattern && isSavedId(pattern.id) && !opts.copy;
+  const base = P.gradientSettings(pattern || P.builtinById('b-g-aurora'));
+  grad = {
+    gid, n: positions(g.lights, gid).length,
+    name: mine ? pattern.name : pattern ? `${pattern.name.replace(/^\p{Extended_Pictographic}️?\s*/u, '')} (mine)`.slice(0, 40) : '',
+    editingId: mine ? pattern.id : null,
+    ...clone(base),
+    motion: pattern ? patternMotion(pattern) : normalizeMotion('none'),
+    sel: 0,
+    from: opts.from || 'library',
+    sent: null,
+  };
+  grad.start = mine ? gradState() : '';
+  show('grad');
+  window.scrollTo(0, 0);
+  renderGradient();
+}
+
+function gradPattern() {
+  const stops = grad.stops.map(s => ({ c: s.c, b: s.b, pos: Math.round(s.pos * 1000) / 1000 }));
+  return {
+    id: grad.editingId || `p-${Date.now().toString(36)}`,
+    name: (grad.name || 'My gradient').slice(0, 40),
+    layout: 'gradient', stops, repeat: grad.repeat, style: grad.style, blend: grad.blend,
+    loop: stops.map(({ c, b }) => ({ c, b })),
+    motion: clone(grad.motion), effect: legacyEffect(grad.motion),
+  };
+}
+
+const stopCss = s => colorCss(s.c);
+
+function renderGradient() {
+  const m = grad;
+  const g = groupById(m.gid);
+  $('#grad-title').textContent = m.name || 'New gradient';
+  $('#grad-title').classList.toggle('placeholder', !m.name);
+  $('#grad-sub').textContent = `${g.name} · ${m.n} lights`;
+  const dirty = gradDirty();
+  $('#grad-save').textContent = m.editingId && !dirty ? 'Saved ✓' : 'Save';
+  $('#grad-save').classList.toggle('primary', dirty || !m.editingId);
+  renderGradientBar();
+  renderGradientStop();
+  renderGradientHouse();
+  $('#grad-rep').textContent = m.repeat;
+  $('#grad-rep-minus').disabled = m.repeat <= 1;
+  $('#grad-rep-plus').disabled = m.repeat >= 8;
+  document.querySelectorAll('#grad-style button').forEach(b => b.classList.toggle('active', b.dataset.v === m.style));
+  document.querySelectorAll('#grad-blend button').forEach(b => b.classList.toggle('active', b.dataset.v === m.blend));
+  const each = Math.max(1, Math.round(m.n / m.repeat / (m.style === 'mirror' ? 2 : 1)));
+  $('#grad-flow-note').textContent = m.style === 'mirror'
+    ? `Flows there and back ${m.repeat === 1 ? 'once' : `${m.repeat} times`} around the house, about ${each} lights each way.`
+    : `Runs ${m.repeat === 1 ? 'once' : `${m.repeat} times`} around the house, about ${each} lights each time.`;
+  document.querySelectorAll('#grad-motion button').forEach(b => b.classList.toggle('active', b.dataset.v === m.motion.type));
+  $('#grad-motion-extra').hidden = m.motion.type === 'none';
+  $('#grad-dir').hidden = m.motion.type !== 'chase';
+  $('#grad-dir').textContent = m.motion.dir === 'backward' ? '← Back' : 'Forward →';
+  $('#grad-speed').value = Math.round(m.motion.speed * 100);
+  $('#grad-presets').replaceChildren(...BUILTIN.filter(isGradient).map(pt => el('button', {
+    class: 'preset', onclick: () => {
+      if (gradDirty() && grad.editingId && !confirm(`Replace the colors of “${grad.name}” with ${pt.name}?`)) return;
+      Object.assign(grad, clone(P.gradientSettings(pt)), { sel: 0 });
+      renderGradient();
+    },
+  }, el('span', { class: 'preset-bar', style: `background:${gradientCss(pt)}` }), el('span', { class: 'preset-name', text: pt.name }))));
+  $('#grad-share').hidden = !m.editingId;
+  $('#grad-delete').hidden = !m.editingId;
+  const upToDate = m.sent === JSON.stringify(gradPattern().stops) + gradState();
+  $('#grad-preview').textContent = upToDate ? '✓ On house' : '💡 Show on house';
+  $('#grad-preview').classList.toggle('primary', !upToDate);
+  $('#grad-preview').classList.toggle('done', upToDate);
+}
+
+// One run of the gradient (stop to stop) as a CSS gradient, sampled finely so
+// the screen shows the same perceptual blend the lights get.
+function gradientCss(pt, samples = 48) {
+  const g = P.gradientSettings(pt);
+  const cols = [];
+  for (let i = 0; i <= samples; i++) {
+    const x = P.gradientAt(g, i / samples);
+    cols.push(`${cellCss(x)} ${((i / samples) * 100).toFixed(1)}%`);
+  }
+  return `linear-gradient(90deg, ${cols.join(', ')})`;
+}
+
+function renderGradientBar() {
+  const m = grad;
+  $('#grad-fill').style.background = gradientCss(m);
+  $('#grad-handles').replaceChildren(...m.stops.map((s, i) => el('button', {
+    class: 'grad-handle' + (i === m.sel ? ' selected' : ''),
+    style: `left:${(s.pos * 100).toFixed(2)}%;--c:${stopCss(s)}`,
+    'aria-label': `Color ${i + 1} of ${m.stops.length}, ${colorName(s.c)}, at ${Math.round(s.pos * 100)}%`,
+    'data-i': i,
+  })));
+}
+
+const GRAD_LEVELS = [[1, '100%'], [0.6, '60%'], [0.3, '30%']];
+
+function renderGradientStop() {
+  const m = grad;
+  const s = m.stops[m.sel];
+  if (!s) { $('#grad-stop').replaceChildren(); return; }
+  $('#grad-stop').replaceChildren(
+    el('div', { class: 'grad-stop-head' },
+      el('span', { class: 'grad-stop-dot', style: `background:${stopCss(s)}` }),
+      el('span', { class: 'grow' }, el('strong', { text: colorName(s.c) }), el('span', { class: 'muted small', text: `Color ${m.sel + 1} of ${m.stops.length} · ${Math.round(s.pos * 100)}% along` })),
+      m.stops.length > 2 && el('button', { class: 'link small danger-link', onclick: () => removeStop(m.sel) }, 'Remove')),
+    el('div', { class: 'swatch-row' },
+      ...favColors.map(f => sw(colorCss(f.c), f.name || colorName(f.c), () => setStop({ c: f.c }), { class: 'swatch-btn' + (s.c === f.c ? ' active' : '') })),
+      el('button', {
+        class: 'swatch-btn more-colors', 'aria-label': 'Pick any color',
+        onclick: () => openColorSheet({ title: `Color ${m.sel + 1}`, initial: s.c, useLabel: 'Use this color', offerFavorite: true, onPick: c => setStop({ c }) }),
+      }, el('span', { 'aria-hidden': 'true' }, '+'))),
+    el('div', { class: 'sheet-row' },
+      el('span', { class: 'muted small', text: 'Brightness' }),
+      el('div', { class: 'levels' }, ...GRAD_LEVELS.map(([v, t]) => el('button', {
+        class: Math.abs(s.b - v) < 0.05 ? 'active' : '', onclick: () => setStop({ b: v }),
+      }, t)))));
+}
+
+function renderGradientHouse() {
+  const m = grad;
+  const g = groupById(m.gid);
+  const cells = P.gradientCells(m, m.n);
+  const pos = positions(g.lights, g.id);
+  let i = 0;
+  $('#grad-house').replaceChildren(...g.lights.map(l => {
+    const len = pos.filter(p => p.light === l).length;
+    const dots = [];
+    for (let k = 0; k < len; k++, i++) {
+      const x = cells[i];
+      dots.push(el('span', { style: `--c:${cellCss(x)};opacity:${Math.max(0.35, Math.min(1, x.b * 1.4))}` }));
+    }
+    return el('div', { class: 'strip-row' },
+      el('div', { class: 'muted small', text: `${l.label} · ${len} light${len === 1 ? '' : 's'}` }),
+      el('div', { class: 'bulbs' }, dots));
+  }));
+}
+
+function setStop(change) {
+  Object.assign(grad.stops[grad.sel], change);
+  renderGradient();
+}
+
+function removeStop(i) {
+  if (grad.stops.length <= 2) return;
+  grad.stops.splice(i, 1);
+  grad.sel = Math.min(grad.sel, grad.stops.length - 1);
+  renderGradient();
+}
+
+// Drag a stop along the bar; pull it down off the bar to remove it. Tap the
+// bar to add a color there (the color the gradient already has at that spot).
+(() => {
+  const bar = $('#grad-bar');
+  let drag = null;
+  const posAt = x => { const r = $('#grad-fill').getBoundingClientRect(); return Math.min(1, Math.max(0, (x - r.left) / r.width)); };
+  bar.addEventListener('pointerdown', e => {
+    if (!grad) return;
+    const handle = e.target.closest('.grad-handle');
+    if (handle) {
+      const i = +handle.dataset.i;
+      grad.sel = i;
+      drag = { i, x: e.clientX, y: e.clientY, moved: false, off: false };
+      bar.setPointerCapture(e.pointerId);
+      renderGradientBar();
+      renderGradientStop();
+      return;
+    }
+    const pos = posAt(e.clientX);
+    const at = P.gradientAt(P.gradientSettings(grad), pos);
+    grad.stops.push({ c: at.c, b: Math.max(0.3, Math.min(1, at.b)), pos });
+    grad.stops.sort((a, b) => a.pos - b.pos);
+    grad.sel = grad.stops.findIndex(s => s.pos === pos);
+    renderGradient();
+  });
+  let frame = 0;
+  bar.addEventListener('pointermove', e => {
+    if (!drag) return;
+    if (Math.abs(e.clientX - drag.x) > 3) drag.moved = true;
+    drag.off = grad.stops.length > 2 && e.clientY - drag.y > 56;
+    const s = grad.stops[drag.i];
+    s.pos = posAt(e.clientX);
+    if (frame) return;
+    frame = requestAnimationFrame(() => {
+      frame = 0;
+      // Keep the list in order while dragging, and follow the dragged stop.
+      const moving = grad.stops[drag.i];
+      grad.stops.sort((a, b) => a.pos - b.pos);
+      drag.i = grad.stops.indexOf(moving);
+      grad.sel = drag.i;
+      renderGradientBar();
+      bar.querySelector(`.grad-handle[data-i="${drag.i}"]`)?.classList.toggle('removing', drag.off);
+      $('#grad-fill').style.background = gradientCss(grad);
+      renderGradientHouse();
+    });
+  });
+  const end = () => {
+    if (!drag) return;
+    const d = drag;
+    drag = null;
+    if (d.off) removeStop(d.i); else renderGradient();
+  };
+  bar.addEventListener('pointerup', end);
+  bar.addEventListener('pointercancel', end);
+})();
+
+function closeGradient(force = false) {
+  if (!force && gradDirty() && !confirm('Leave without saving? Your changes to this gradient will be lost.')) return;
+  const back = grad?.from === 'library' && libView ? 'library' : 'main';
+  grad = null;
+  show(back);
+  rerender();
+}
+
+function saveGradient() {
+  if (!grad.name) {
+    const name = prompt('Name this gradient', '')?.trim();
+    if (!name) return;
+    grad.name = name.slice(0, 40);
+  }
+  const pt = gradPattern();
+  const i = saved.findIndex(p => p.id === pt.id);
+  if (i >= 0) saved[i] = pt; else saved.push(pt);
+  saveLibrary();
+  grad.editingId = pt.id;
+  grad.start = gradState();
+  renderGradient();
+  const using = schedulesUsing(pt.id);
+  showActivity(using.length
+    ? `✓ Saved “${pt.name}” · ${using.map(s => s.groupName).join(' & ')} schedule${using.length === 1 ? '' : 's'} use the new version`
+    : `✓ Saved “${pt.name}” to the Library`, 'ok');
+  if (using.length) { flushSync(`prefs/library/${house.key}`); refreshSchedulesUsing(pt.id); }
+}
+
+$('#grad-back').addEventListener('click', () => closeGradient());
+$('#grad-save').addEventListener('click', saveGradient);
+$('#grad-rename').addEventListener('click', () => {
+  const name = prompt('Name this gradient', grad.name)?.trim();
+  if (name) { grad.name = name.slice(0, 40); renderGradient(); }
+});
+$('#grad-rep-minus').addEventListener('click', () => { grad.repeat = Math.max(1, grad.repeat - 1); renderGradient(); });
+$('#grad-rep-plus').addEventListener('click', () => { grad.repeat = Math.min(8, grad.repeat + 1); renderGradient(); });
+document.querySelectorAll('#grad-style button').forEach(b => b.addEventListener('click', () => { grad.style = b.dataset.v; renderGradient(); }));
+document.querySelectorAll('#grad-blend button').forEach(b => b.addEventListener('click', () => { grad.blend = b.dataset.v; renderGradient(); }));
+document.querySelectorAll('#grad-motion button').forEach(b => b.addEventListener('click', () => { grad.motion = { ...grad.motion, type: b.dataset.v }; renderGradient(); }));
+$('#grad-dir').addEventListener('click', () => { grad.motion = { ...grad.motion, dir: grad.motion.dir === 'backward' ? 'forward' : 'backward' }; renderGradient(); });
+$('#grad-speed').addEventListener('change', e => { grad.motion = { ...grad.motion, speed: e.target.value / 100 }; renderGradient(); });
+$('#grad-preview').addEventListener('click', () => {
+  const m = grad;
+  const g = groupById(m.gid);
+  const pt = gradPattern();
+  const key = JSON.stringify(pt.stops) + gradState();
+  run(`Show on house · ${g.name}`, async () => {
+    await paintGroup(g, P.gradientCells(m, m.n), m.motion, m.editingId && !gradDirty() ? { name: pt.name, id: pt.id } : { name: m.name ? `${m.name} (edited)` : 'New gradient' });
+    m.sent = key;
+  }).then(() => { if (grad === m) renderGradient(); });
+});
+$('#grad-share').addEventListener('click', () => openSendDialog(gradPattern()));
+$('#grad-delete').addEventListener('click', () => {
+  const pt = saved.find(p => p.id === grad.editingId);
+  if (!pt) return;
+  const using = schedulesUsing(pt.id);
+  const warning = using.length ? `\n\nYour ${using.map(s => s.groupName).join(' & ')} schedule uses it. It will keep using the colors it has now until you pick another pattern for it.` : '';
+  if (!confirm(`Delete the gradient “${pt.name}”?${warning}`)) return;
+  saved = saved.filter(p => p.id !== pt.id);
+  saveLibrary();
+  showActivity(`Deleted “${pt.name}”`, 'ok');
+  closeGradient(true);
+});
+// Turn the gradient into a painted pattern, to change single lights.
+$('#grad-convert').addEventListener('click', () => {
+  if (!confirm('Make a painted copy of this gradient? You can then change single lights. The gradient itself stays as it is.')) return;
+  const m = grad;
+  const cells = P.gradientCells(m, m.n);
+  const name = `${m.name || 'Gradient'} (painted)`.slice(0, 40);
+  const from = m.from;
+  grad = null;
+  openMaker(m.gid, { name, loop: [cells[0]], cells, motion: m.motion }, { from, copy: true, keepCells: true });
+});
+
+// ----- New pattern: a gradient, or painted light by light -----
+function newPattern(gid, from = 'library') {
+  const dlg = $('#new-dialog');
+  $('#new-gradient').onclick = () => { dlg.close(); openGradient(gid, null, { from }); };
+  $('#new-painted').onclick = () => { dlg.close(); openMaker(gid, null, { from }); };
+  dlg.showModal();
+}
+$('#new-cancel').addEventListener('click', () => $('#new-dialog').close());
+
 
 // ---------- Demo mode (fake lights, no network) ----------
 

@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-16">
+  <meta name="app-version" content="2026.11.24-17">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-16">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-17">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -106,6 +106,106 @@
     </header>
     <div id="group-body"></div>
   </section>
+
+  <!-- Gradient editor: shape a flow of color; the lights follow -->
+  <section id="grad" class="screen" hidden>
+    <header class="maker-head">
+      <button id="grad-back" class="icon-btn" aria-label="Back">‹</button>
+      <button id="grad-rename" class="title-btn" aria-label="Rename gradient">
+        <span class="title-line"><span id="grad-title">New gradient</span><span class="pencil" aria-hidden="true">✎</span></span>
+        <span id="grad-sub" class="muted small"></span>
+      </button>
+      <button id="grad-save" class="small">Save</button>
+    </header>
+
+    <div class="card grad-stage">
+      <div id="grad-bar" class="grad-bar" aria-label="Gradient. Tap to add a color; drag a color to move it, or drag it away to remove it.">
+        <div id="grad-fill" class="grad-fill"></div>
+        <div id="grad-handles" class="grad-handles"></div>
+      </div>
+      <p class="muted small grad-hint">Tap the bar to add a color. Drag a color to move it, or pull it down off the bar to remove it.</p>
+      <div id="grad-stop" class="grad-stop"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">On your house</h3>
+      <div id="grad-house" class="grad-house"></div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Flow</h3>
+      <div class="opt-row">
+        <span class="muted small">Repeats</span>
+        <div class="stepper" role="group" aria-label="Repeats around the house">
+          <button id="grad-rep-minus" class="small" aria-label="Fewer repeats">−</button>
+          <span id="grad-rep" aria-live="polite">1</span>
+          <button id="grad-rep-plus" class="small" aria-label="More repeats">+</button>
+        </div>
+      </div>
+      <div class="opt-row">
+        <span class="muted small">Style</span>
+        <div id="grad-style" class="segmented two" role="group" aria-label="Style">
+          <button data-v="mirror">Mirror</button>
+          <button data-v="repeat">Repeat</button>
+        </div>
+      </div>
+      <div class="opt-row">
+        <span class="muted small">Blend</span>
+        <div id="grad-blend" class="segmented two" role="group" aria-label="Blend">
+          <button data-v="direct">Direct</button>
+          <button data-v="rainbow">Rainbow</button>
+        </div>
+      </div>
+      <p id="grad-flow-note" class="muted small"></p>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Motion</h3>
+      <div id="grad-motion" class="segmented four" role="group" aria-label="Motion">
+        <button data-v="none">Steady</button>
+        <button data-v="chase">Chase</button>
+        <button data-v="breathe">Breathe</button>
+        <button data-v="pulse">Pulse</button>
+      </div>
+      <div id="grad-motion-extra" class="motion-extra" hidden>
+        <button id="grad-dir" class="small">Forward →</button>
+        <div class="speed-control grow">
+          <span class="muted small">Slow</span>
+          <input id="grad-speed" type="range" min="0" max="100" step="1" aria-label="Speed, slow to fast">
+          <span class="muted small">Fast</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <h3 class="first">Start from</h3>
+      <div id="grad-presets" class="preset-grid"></div>
+    </div>
+
+    <div class="row maker-extra">
+      <button id="grad-convert" class="small">Convert to painted</button>
+      <button id="grad-share" class="small" hidden>Send to another house</button>
+      <button id="grad-delete" class="small danger" hidden>Delete</button>
+    </div>
+
+    <div class="maker-bottom">
+      <button id="grad-preview" class="primary wide">💡 Show on house</button>
+    </div>
+  </section>
+
+  <!-- New pattern: gradient or painted -->
+  <dialog id="new-dialog" aria-labelledby="new-title">
+    <h2 id="new-title">New pattern</h2>
+    <button id="new-gradient" class="new-choice">
+      <span class="new-swatch grad" aria-hidden="true"></span>
+      <span class="grow"><strong>Gradient</strong><span class="muted small">Smooth color that flows along the lights</span></span>
+    </button>
+    <button id="new-painted" class="new-choice">
+      <span class="new-swatch painted" aria-hidden="true"></span>
+      <span class="grow"><strong>Paint lights</strong><span class="muted small">Choose colors light by light</span></span>
+    </button>
+    <button id="new-cancel">Cancel</button>
+  </dialog>
 
   <!-- Pattern maker -->
   <section id="maker" class="screen" hidden>
@@ -432,6 +532,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-16"></script>
+  <script src="app.js?v=2026.11.24-17"></script>
 </body>
 </html>

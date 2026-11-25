@@ -734,3 +734,14 @@ test('a pattern sent to another house lands in its inbox as plain data, for that
   assert.equal((await dad.call('GET', 'inbox/mom_and_dad')).body.items.length, 0);
 });
 
+test('gradients can be sent to another house, and are checked like any pattern', async () => {
+  const { app } = setup();
+  const { admin } = await setUpAdmin(app);
+  const gradient = { name: 'Aurora (mine)', layout: 'gradient', loop: [{ c: 'hue:160 saturation:1', b: 1 }], stops: [{ c: 'hue:160 saturation:1', b: 1, pos: 0 }, { c: 'hue:300 saturation:0.7', b: 1, pos: 1 }], repeat: 3, style: 'mirror', blend: 'rainbow' };
+  assert.equal((await admin.call('POST', 'shares/mom_and_dad', { from: 'home', pattern: gradient })).status, 201);
+  const item = (await admin.call('GET', 'inbox/mom_and_dad')).body.items[0];
+  assert.deepEqual([item.pattern.layout, item.pattern.stops.length, item.pattern.repeat, item.pattern.blend], ['gradient', 2, 3, 'rainbow']);
+  const broken = { ...gradient, stops: [{ c: 'hue:1 saturation:1', b: 1, pos: 2 }, { c: 'hue:2 saturation:1', b: 1, pos: 0 }] };
+  assert.equal((await admin.call('POST', 'shares/mom_and_dad', { from: 'home', pattern: broken })).status, 400);
+});
+

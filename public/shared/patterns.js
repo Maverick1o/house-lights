@@ -26,6 +26,167 @@ export const COLORS = [
 export const C = Object.fromEntries(COLORS.map(c => [c.name, c.api]));
 export const cell = (c, b = 1) => ({ c, b });
 
+// ---------- Color science ----------
+// Gradients blend in OKLCH, a color space built around how eyes see color,
+// so midpoints stay bright and rich (red to blue passes through a vivid
+// violet, not a muddy purple-gray). LIFX speaks hue/saturation/brightness
+// (and kelvin for whites), so colors are converted on the way in and out.
+
+const lin = c => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const gam = c => { c = Math.min(1, Math.max(0, c)); return c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055; };
+
+function rgbToOklch([r, g, b]) {
+  r = lin(r); g = lin(g); b = lin(b);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+  const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  return [L, Math.hypot(A, B), Math.atan2(B, A)];
+}
+
+function oklchToRgb([L, C, H]) {
+  const A = C * Math.cos(H), B = C * Math.sin(H);
+  const l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3;
+  const m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3;
+  const s = (L - 0.0894841775 * A - 1.291485548 * B) ** 3;
+  return [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+}
+
+// Bring an out-of-range color back inside what screens and LEDs can show by
+// easing off its chroma, which keeps its hue and lightness. Returns sRGB (0–1).
+function inGamut(lch) {
+  let [L, C, H] = lch;
+  let rgb = oklchToRgb([L, C, H]);
+  for (let i = 0; i < 12 && !rgb.every(v => v >= -0.001 && v <= 1.001); i++) {
+    C *= 0.85;
+    rgb = oklchToRgb([L, C, H]);
+  }
+  return rgb.map(gam);
+}
+
+export function hsvToRgb(h, s, v = 1) {
+  const f = n => { const k = (n + h / 60) % 6; return v - v * s * Math.max(0, Math.min(k, 4 - k, 1)); };
+  return [f(5), f(3), f(1)];
+}
+
+function rgbToHsv([r, g, b]) {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), d = max - min;
+  let h = 0;
+  if (d) h = max === r ? ((g - b) / d) % 6 : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [(h * 60 + 360) % 360, max ? d / max : 0, max];
+}
+
+// How a white at a color temperature looks, roughly (1500K warm … 9000K cool).
+const KELVIN_RGB = [[1500, [1, 0.6, 0.24]], [2700, [1, 0.82, 0.63]], [4000, [1, 0.95, 0.88]], [6500, [0.96, 0.97, 1]], [9000, [0.84, 0.89, 1]]];
+export function kelvinToRgb(k) {
+  const i = Math.min(KELVIN_RGB.length - 1, Math.max(1, KELVIN_RGB.findIndex(([x]) => x >= k)));
+  const [k0, a] = KELVIN_RGB[i - 1], [k1, b] = KELVIN_RGB[i];
+  const f = Math.max(0, Math.min(1, (k - k0) / (k1 - k0)));
+  return a.map((v, j) => v + (b[j] - v) * f);
+}
+
+export function parseHsbk(c) {
+  const o = {};
+  for (const [, k, v] of String(c).matchAll(/(\w+):([\d.]+)/g)) o[k] = Number(v);
+  return { h: o.hue ?? 0, s: o.saturation ?? 0, k: o.kelvin ?? 3500 };
+}
+
+/** A LIFX color string as RGB (0–1) at full brightness. */
+export function lifxToRgb(c) {
+  if (typeof c === 'string' && c.startsWith('#')) return [1, 3, 5].map(i => parseInt(c.slice(i, i + 2), 16) / 255);
+  const { h, s, k } = parseHsbk(c);
+  return s < 0.01 ? kelvinToRgb(k) : hsvToRgb(h, s, 1);
+}
+
+/** A cell from a #hex color: its hue and saturation, with its darkness as brightness. */
+export function hexCell(hex) {
+  const [h, s, v] = rgbToHsv([1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255));
+  return s < 0.03
+    ? cell('kelvin:5000 saturation:0', Math.round(Math.max(0.05, v) * 100) / 100)
+    : cell(`hue:${Math.round(h)} saturation:${Math.round(s * 100) / 100}`, Math.round(Math.max(0.05, v) * 100) / 100);
+}
+
+// ---------- Gradients ----------
+// A gradient is color stops along the string: { c, b, pos 0–1 }. It can
+// repeat around the house (mirrored, so it flows back and forth, or
+// restarting), and blend directly or the long way round the color wheel.
+
+export const GRADIENT_STYLES = ['mirror', 'repeat'];
+export const GRADIENT_BLENDS = ['direct', 'rainbow'];
+
+export function gradientSettings(p) {
+  const stops = (Array.isArray(p?.stops) && p.stops.length >= 2 ? p.stops : (p?.loop || []).map((x, i, a) => ({ ...x, pos: a.length > 1 ? i / (a.length - 1) : 0 })))
+    .filter(x => x && typeof x.c === 'string')
+    .map(x => ({ c: x.c, b: typeof x.b === 'number' ? Math.min(1, Math.max(0.01, x.b)) : 1, pos: Math.min(1, Math.max(0, Number(x.pos) || 0)) }))
+    .sort((a, b) => a.pos - b.pos);
+  return {
+    stops: stops.length ? stops : [{ c: C.Red, b: 1, pos: 0 }, { c: C.Blue, b: 1, pos: 1 }],
+    repeat: Number.isInteger(p?.repeat) && p.repeat >= 1 && p.repeat <= 8 ? p.repeat : 1,
+    style: GRADIENT_STYLES.includes(p?.style) ? p.style : 'mirror',
+    blend: GRADIENT_BLENDS.includes(p?.blend) ? p.blend : 'direct',
+  };
+}
+
+// Straight through each stop (perceptual blending is already smooth); easing
+// in and out of every stop would leave flat bands of color at each one.
+const ease = f => f;
+
+/** The color at t (0–1) along a gradient: { c, b }. */
+export function gradientAt(g, t) {
+  const stops = g.stops;
+  if (t <= stops[0].pos) return { c: stops[0].c, b: stops[0].b };
+  if (t >= stops.at(-1).pos) return { c: stops.at(-1).c, b: stops.at(-1).b };
+  let k = 0;
+  while (k < stops.length - 2 && t > stops[k + 1].pos) k++;
+  const a = stops[k], z = stops[k + 1];
+  const f = ease(z.pos > a.pos ? (t - a.pos) / (z.pos - a.pos) : 0);
+  const b = Math.round(Math.max(0.01, a.b + (z.b - a.b) * f) * 100) / 100;
+  const ha = parseHsbk(a.c), hz = parseHsbk(z.c);
+  // Two whites: blend the color temperature.
+  if (ha.s < 0.01 && hz.s < 0.01 && !a.c.startsWith('#') && !z.c.startsWith('#')) {
+    return { c: `kelvin:${Math.round((ha.k + (hz.k - ha.k) * f) / 50) * 50} saturation:0`, b };
+  }
+  const A = rgbToOklch(lifxToRgb(a.c)), Z = rgbToOklch(lifxToRgb(z.c));
+  // A white has no hue of its own: it takes its neighbor's.
+  if (A[1] < 0.02) A[2] = Z[2];
+  if (Z[1] < 0.02) Z[2] = A[2];
+  let dh = Z[2] - A[2];
+  while (dh > Math.PI) dh -= 2 * Math.PI;
+  while (dh < -Math.PI) dh += 2 * Math.PI;
+  if (g.blend === 'rainbow' && A[1] >= 0.02 && Z[1] >= 0.02) dh = dh > 0 ? dh - 2 * Math.PI : dh + 2 * Math.PI;
+  const rgb = inGamut([A[0] + (Z[0] - A[0]) * f, A[1] + (Z[1] - A[1]) * f, A[2] + dh * f]);
+  const [h, s, v] = rgbToHsv(rgb);
+  // Stops carry their own brightness; blending only nudges it where colors
+  // genuinely darken between them, so the string stays evenly lit.
+  const bright = Math.round(Math.max(0.01, b * (0.75 + 0.25 * v)) * 100) / 100;
+  return s < 0.02
+    ? { c: 'kelvin:5500 saturation:0', b: bright }
+    : { c: `hue:${Math.round(h)} saturation:${Math.round(s * 100) / 100}`, b: bright };
+}
+
+/** A gradient laid along n lights. */
+export function gradientCells(pattern, n) {
+  const g = gradientSettings(pattern);
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    let t;
+    if (g.repeat === 1 && g.style === 'repeat') t = n > 1 ? i / (n - 1) : 0;
+    else {
+      const x = ((i + 0.5) / n) * g.repeat;
+      const frac = x - Math.floor(x);
+      t = g.style === 'mirror' ? (frac < 0.5 ? frac * 2 : 2 - frac * 2) : frac;
+    }
+    out.push(gradientAt(g, t));
+  }
+  return out;
+}
+
 // ---------- The pattern catalog ----------
 // Built-in patterns, grouped like a library. Holidays carry the dates they're
 // "in season" (MM-DD ranges, which may wrap New Year) so the home screen can
@@ -33,6 +194,7 @@ export const cell = (c, b = 1) => ({ c, b });
 
 export const CATEGORIES = [
   { id: 'holidays', name: 'Holidays & seasons' },
+  { id: 'gradients', name: 'Gradients' },
   { id: 'calm', name: 'Moods · Calm' },
   { id: 'lively', name: 'Moods · Bright & lively' },
   { id: 'cozy', name: 'Moods · Warm & cozy' },
@@ -43,6 +205,11 @@ const hsb = (h, s, b = 1, k = 3500) => (s < 0.01 ? cell(`kelvin:${k} saturation:
 const holiday = (id, name, loop, seasons) => ({ id, name, loop, seasons, category: 'holidays' });
 // Moods use the colours of the LIFX app's Moods, blended smoothly along the lights.
 const mood = (id, name, category, palette, seasons) => ({ id, name, category, layout: 'blend', loop: palette, seasons });
+// Gradients: stops from #hex, spread evenly unless positions are given; tuned for how LEDs glow.
+const gradient = (id, name, hexes, { repeat = 2, style = 'mirror', blend = 'direct', pos } = {}) => {
+  const stops = hexes.map((h, i) => ({ ...hexCell(h), pos: pos ? pos[i] : i / (hexes.length - 1) }));
+  return { id, name, category: 'gradients', layout: 'gradient', stops, repeat, style, blend, loop: stops.map(({ c, b }) => ({ c, b })) };
+};
 
 export const BUILTIN = [
   holiday('b-newyear', '🎆 New Year', [hsb(45, 0.85), cell(C.White)], [['12-26', '01-02']]),
@@ -74,6 +241,27 @@ export const BUILTIN = [
   mood('b-m-mellow', '🍷 Mellow', 'cozy', [hsb(359, 0.31, 0.59), hsb(315, 0.24, 1), hsb(79, 0.05, 0.4), hsb(256, 0.36, 0.5), hsb(241, 1, 0.4)]),
   mood('b-m-romance', '🌹 Romance', 'cozy', [hsb(322, 0.15, 0.98), hsb(315, 0.45, 0.92), hsb(349, 0.88, 0.9), hsb(307, 0.16, 1), hsb(345, 0.76, 1)]),
   mood('b-m-warming', '🕯️ Warming', 'cozy', [hsb(4, 1, 0.76), hsb(42, 0.81, 1), hsb(355, 0.81, 0.56), hsb(44, 0.44, 0.65), hsb(51, 0.85, 0.59), hsb(0, 0, 0.3)]),
+
+  gradient('b-g-aurora', '🌌 Aurora', ['#00f5a0', '#00d9f5', '#7f5af0', '#ff4fd8']),
+  gradient('b-g-ember', '🔥 Ember', ['#ff2d1e', '#ff7a00', '#ffc14d', '#ff3d7f']),
+  gradient('b-g-lagoon', '🏝️ Lagoon', ['#00e0c6', '#00c6ff', '#0072ff']),
+  gradient('b-g-sunset', '🌅 Sunset', ['#ff512f', '#f09819', '#ff5e62', '#c86dd7'], { repeat: 1, pos: [0, 0.3, 0.6, 1] }),
+  gradient('b-g-cotton', '🍭 Cotton candy', ['#ff9ad5', '#a18cff', '#7ad7ff']),
+  gradient('b-g-northern', '🌠 Northern lights', ['#43e97b', '#38f9d7', '#4facfe', '#8e54e9'], { pos: [0, 0.25, 0.6, 1] }),
+  gradient('b-g-peach', '🍑 Peach glow', ['#ff6a88', '#ff9a8b', '#ffc3a0']),
+  gradient('b-g-reef', '🪸 Coral reef', ['#ff6f61', '#ffb88c', '#00d4c7']),
+  gradient('b-g-ultraviolet', '💜 Ultraviolet', ['#5b00ff', '#b300ff', '#ff00c8']),
+  gradient('b-g-glacier', '🧊 Glacier', ['#e6f7ff', '#7fd8ff', '#4f7dff'], { pos: [0, 0.45, 1] }),
+  gradient('b-g-citrus', '🍋 Citrus', ['#f9f871', '#ffc75f', '#ff9671']),
+  gradient('b-g-forest', '🌿 Forest mist', ['#00b09b', '#96c93d', '#e2f58a']),
+  gradient('b-g-sakura', '🌸 Sakura', ['#ffd1e3', '#ff8fb1', '#c77dff']),
+  gradient('b-g-desert', '🏜️ Desert dusk', ['#ff7e5f', '#feb47b', '#8e6dd8'], { repeat: 1, pos: [0, 0.45, 1] }),
+  gradient('b-g-peacock', '🦚 Peacock', ['#00d68f', '#00a8a8', '#0061ff', '#7b2ff7']),
+  gradient('b-g-cherry', '🍒 Cherry cola', ['#ff0844', '#ff6a3d', '#ffb199']),
+  gradient('b-g-prism', '🔮 Prism', ['#ff3cac', '#784ba0', '#2b86c5']),
+  gradient('b-g-bloom', '🌺 Midnight bloom', ['#3a1cff', '#a637ff', '#ff4fa3']),
+  gradient('b-g-evergreen', '🌲 Evergreen & gold', ['#00b35c', '#9be15d', '#ffd54a'], { repeat: 3 }),
+  gradient('b-g-swirl', '🍬 Candy swirl', ['#ff2a4d', '#ffd6de'], { repeat: 6 }),
 
   { id: 'b-warm', name: '✨ Warm bulbs', loop: [cell(C.Warm)], category: 'basics' },
   { id: 'b-rainbow', name: '🌈 Rainbow', rainbow: true, category: 'basics' },
@@ -134,6 +322,7 @@ export const spacingOf = p => ({
 
 /** Lay a pattern's colours along n lights, honouring its spacing. */
 export function layoutCells(pattern, n) {
+  if (pattern.layout === 'gradient') return gradientCells(pattern, n);
   if (pattern.layout === 'blend' && pattern.loop?.length) return blendCells(pattern.loop, n);
   const { width, gaps } = spacingOf(pattern);
   const perBlock = gaps === 'none' ? 1 : 2;
@@ -150,30 +339,12 @@ export function layoutCells(pattern, n) {
   return out;
 }
 
-// A smooth blend through the palette, repeating about every 40 lights.
-function parseHsbk(c) {
-  const o = {};
-  for (const [, k, v] of String(c).matchAll(/(\w+):([\d.]+)/g)) o[k] = Number(v);
-  return { h: o.hue ?? 0, s: o.saturation ?? 0, k: o.kelvin ?? 3500 };
-}
+// Moods: a smooth (perceptual) blend through the palette that loops back to
+// its first color, repeating about every 40 lights.
 function blendCells(palette, n) {
-  const pts = palette.map(x => ({ ...parseHsbk(x.c), b: x.b ?? 1 }));
-  const cycles = Math.max(1, Math.round(n / 40));
-  const out = [];
-  for (let i = 0; i < n; i++) {
-    const t = (i / n) * cycles * pts.length;
-    const a = pts[Math.floor(t) % pts.length], z = pts[(Math.floor(t) + 1) % pts.length];
-    const f = t - Math.floor(t);
-    let dh = z.h - a.h;
-    if (dh > 180) dh -= 360;
-    if (dh < -180) dh += 360;
-    // A white blends by temperature; its hue follows the coloured neighbour.
-    const h = a.s < 0.01 ? z.h : z.s < 0.01 ? a.h : (a.h + dh * f + 360) % 360;
-    const s = a.s + (z.s - a.s) * f, k = a.k + (z.k - a.k) * f, b = a.b + (z.b - a.b) * f;
-    const c = s < 0.01 ? `kelvin:${Math.round(k / 100) * 100} saturation:0` : `hue:${Math.round(h)} saturation:${Math.round(s * 100) / 100} kelvin:${Math.round(k / 100) * 100}`;
-    out.push({ c, b: Math.max(0.01, Math.round(b * 100) / 100) });
-  }
-  return out;
+  const k = palette.length;
+  const stops = [...palette, palette[0]].map((x, i) => ({ c: x.c, b: x.b ?? 1, pos: i / k }));
+  return gradientCells({ stops, repeat: Math.max(1, Math.round(n / 40)), style: 'repeat' }, n);
 }
 
 /** The cells a pattern paints on n lights. */

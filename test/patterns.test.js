@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  C, cell, BUILTIN, positions, layoutCells, inSeason, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequest,
+  C, cell, BUILTIN, positions, layoutCells, inSeason, gradientCells, gradientAt, gradientSettings, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequest,
 } from '../public/shared/patterns.js';
 
 const strip = (id, label, count) => ({ id, label, zones: { count }, product: { capabilities: { has_multizone: true } } });
@@ -91,3 +91,47 @@ test('old motion formats still read correctly', () => {
   assert.equal(normalizeMotion('pulse', { speed: 'fast' }).speed, 0.8);
   assert.equal(motionRequest(normalizeMotion('none')), null);
 });
+
+const hueOf = c => Number(/hue:(\d+)/.exec(c)?.[1]);
+const satOf = c => Number(/saturation:([\d.]+)/.exec(c)?.[1]);
+
+test('gradients blend perceptually: vivid midpoints, not gray', () => {
+  const blueToYellow = { stops: [{ c: 'hue:225 saturation:0.88', pos: 0 }, { c: 'hue:49 saturation:0.88', pos: 1 }], repeat: 1, style: 'repeat' };
+  const mid = gradientAt(gradientSettings(blueToYellow), 0.5);
+  assert.ok(satOf(mid.c) > 0.5, `midpoint stays colorful (${mid.c})`);
+  const cells = gradientCells(blueToYellow, 11);
+  assert.equal(hueOf(cells[0].c), 225);
+  assert.equal(hueOf(cells[10].c), 49);
+});
+
+test('the rainbow blend goes the long way round the color wheel', () => {
+  const g = { stops: [{ c: 'hue:0 saturation:1', pos: 0 }, { c: 'hue:240 saturation:1', pos: 1 }], repeat: 1, style: 'repeat' };
+  const direct = gradientCells(g, 7).map(x => hueOf(x.c));
+  const rainbow = gradientCells({ ...g, blend: 'rainbow' }, 7).map(x => hueOf(x.c));
+  assert.ok(direct.slice(1, -1).every(h => h > 240), `direct passes through magenta (${direct})`);
+  assert.ok(rainbow.slice(1, -1).some(h => h > 90 && h < 150), `rainbow passes through green (${rainbow})`);
+});
+
+test('mirrored gradients flow there and back, seamlessly', () => {
+  const g = { stops: [{ c: 'hue:0 saturation:1', pos: 0 }, { c: 'hue:240 saturation:1', pos: 1 }], repeat: 2, style: 'mirror' };
+  const cells = gradientCells(g, 40).map(x => x.c);
+  assert.equal(cells[0], cells[39], 'ends match, so a repeat has no visible seam');
+  assert.equal(cells[0], cells[20]);
+  assert.deepEqual(cells.slice(0, 10), cells.slice(10, 20).reverse());
+});
+
+test('two whites blend by color temperature', () => {
+  const cells = gradientCells({ stops: [{ c: 'kelvin:2700 saturation:0', pos: 0 }, { c: 'kelvin:6500 saturation:0', pos: 1 }], repeat: 1, style: 'repeat' }, 3);
+  assert.deepEqual(cells.map(x => x.c), ['kelvin:2700 saturation:0', 'kelvin:4600 saturation:0', 'kelvin:6500 saturation:0']);
+});
+
+test('20 built-in gradients, all valid and lit', () => {
+  const gradients = BUILTIN.filter(b => b.layout === 'gradient');
+  assert.equal(gradients.length, 20);
+  for (const g of gradients) {
+    const cells = layoutCells(g, 120);
+    assert.equal(cells.length, 120);
+    for (const x of cells) assert.ok(x.b > 0.2 && /^(hue:\d+ saturation:[\d.]+|kelvin:\d+ saturation:0)$/.test(x.c), `${g.name}: ${x.c} @ ${x.b}`);
+  }
+});
+
