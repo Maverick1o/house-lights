@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  C, cell, BUILTIN, positions, layoutCells, inSeason, gradientCells, gradientAt, gradientSettings, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequests,
+  C, cell, BUILTIN, positions, layoutCells, inSeason, gradientCells, gradientAt, gradientSettings, orderLights, patternCells, cellsToStates, resolvePattern, expandPattern, normalizeMotion, motionRequests, motionCells, MOTIONS,
 } from '../public/shared/patterns.js';
 
 const strip = (id, label, count) => ({ id, label, zones: { count }, product: { capabilities: { has_multizone: true } } });
@@ -159,5 +159,42 @@ test('the single-sweep gradients run once across the lights with every stop a di
     assert.notEqual(cells[0].c, cells[119].c, `${g.name}: starts and ends on different colors`);
   }
   assert.equal(BUILTIN.filter(b => b.layout === 'gradient').length, 25);
+});
+
+test('nine motions: travel ones move each strip, in-place ones use waveforms', () => {
+  assert.deepEqual(MOTIONS.map(m => m.type), ['none', 'chase', 'wave', 'comet', 'drift', 'breathe', 'shimmer', 'pulse', 'strobe']);
+  const strips = [strip('a', 'A', 30), strip('b', 'B', 30)];
+  for (const type of ['wave', 'comet', 'drift']) {
+    const r = motionRequests({ type, speed: 0.5, dir: 'forward' }, 'group_id:g', strips);
+    assert.deepEqual(r.map(x => x.effect), ['move', 'move'], type);
+  }
+  const drift = motionRequests({ type: 'drift', speed: 0 }, 'group_id:g', [strips[0]])[0].body.period;
+  assert.ok(drift / 30 >= 25, 'color drift is a slow slide');
+  const shimmer = motionRequests({ type: 'shimmer', speed: 0.5 }, 'group_id:g')[0];
+  assert.deepEqual([shimmer.effect, shimmer.body.color], ['breathe', 'brightness:0.55']);
+  const strobe = motionRequests({ type: 'strobe', speed: 1 }, 'group_id:g')[0];
+  assert.deepEqual([strobe.effect, strobe.body.color], ['pulse', 'brightness:0']);
+  assert.ok(strobe.body.period <= 0.1);
+});
+
+test('a strip laid in reverse moves the other way, so the string flows as one', () => {
+  const r = motionRequests({ type: 'chase', speed: 0.5, dir: 'forward' }, 'group_id:g', [strip('a', 'A', 10), strip('b', 'B', 10)], { reversed: { b: true } });
+  assert.deepEqual(r.map(x => x.body.direction), ['forward', 'backward']);
+});
+
+test('wave and comet shape brightness along the string; other motions leave the pattern alone', () => {
+  const cells = Array.from({ length: 40 }, () => cell(C.Red));
+  const wave = motionCells(cells, { type: 'wave' }).map(x => x.b);
+  assert.ok(Math.max(...wave) === 1 && Math.min(...wave) < 0.2, 'bright and dim bands');
+  assert.ok(wave.every(b => b > 0), 'never fully off');
+  const comet = motionCells(cells, { type: 'comet', dir: 'forward' }).map(x => x.b);
+  assert.equal(comet[0], 1, 'a bright head');
+  assert.ok(comet.includes(0), 'dark space between comets');
+  const fwd = motionCells(cells, { type: 'comet', dir: 'forward' }).map(x => x.b);
+  const back = motionCells(cells, { type: 'comet', dir: 'backward' }).map(x => x.b);
+  assert.ok(fwd[fwd.length - 1] > 0 && back[1] > 0 && fwd[1] === 0, 'the tail trails behind the way it moves');
+  assert.deepEqual(motionCells(cells, { type: 'chase' }), cells);
+  const shaped = expandPattern({ id: 'p', loop: [cell(C.Red)], motion: { type: 'wave' } }, [strip('a', 'A', 40)], {});
+  assert.ok(new Set(shaped.states.map(st => st.brightness)).size > 3, 'schedules paint the wave shape too');
 });
 

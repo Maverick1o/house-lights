@@ -676,3 +676,9 @@ body.has-tabbar { padding-bottom: calc(env(safe-area-inset-bottom) + 92px); }
 .panel-head .panel-state { max-width: 100%; padding: 0; border-radius: 0; background: none; font-size: 17px; font-weight: 700; color: #fff; white-space: normal; text-align: left; }
 .panel-head .panel-what { font-size: 13px; font-weight: 400; color: rgba(235, 235, 245, .62); }
 .sched-item .grow > span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+/* Motion choices: grouped tiles in the group card, a 3×3 grid in the editors */
+.motion-tile.wide { grid-column: 1 / -1; min-height: 0; flex-direction: row; align-items: center; gap: 12px; }
+.motion-tile.wide strong { margin-top: 0; }
+.motion-group-label { grid-column: 1 / -1; margin: 8px 2px 0; font-size: 13px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: rgba(235, 235, 245, .65); }
+.segmented.motion-choices { grid-template-columns: repeat(3, 1fr); }
+.segmented.motion-choices button { min-height: 38px; font-size: 13px; }

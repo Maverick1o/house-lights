@@ -9,11 +9,11 @@
   <meta name="apple-mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="House Lights">
-  <meta name="app-version" content="2026.11.24-19">
+  <meta name="app-version" content="2026.11.24-20">
   <link rel="manifest" href="manifest.webmanifest">
   <link rel="icon" href="icon.svg" type="image/svg+xml">
   <link rel="apple-touch-icon" href="icon-180.png">
-  <link rel="stylesheet" href="styles.css?v=2026.11.24-19">
+  <link rel="stylesheet" href="styles.css?v=2026.11.24-20">
 </head>
 <body>
   <!-- Activity bar: what the app is doing right now -->
@@ -161,12 +161,7 @@
 
     <div class="card">
       <h3 class="first">Motion</h3>
-      <div id="grad-motion" class="segmented four" role="group" aria-label="Motion">
-        <button data-v="none">Steady</button>
-        <button data-v="chase">Chase</button>
-        <button data-v="breathe">Breathe</button>
-        <button data-v="pulse">Pulse</button>
-      </div>
+      <div id="grad-motion" class="segmented motion-choices" role="group" aria-label="Motion"></div>
       <div id="grad-motion-extra" class="motion-extra" hidden>
         <button id="grad-dir" class="small">Forward →</button>
         <div class="speed-control grow">
@@ -267,12 +262,7 @@
       </div>
       <div id="house-grid"></div>
       <h3>Motion</h3>
-      <div id="effect-seg" class="segmented four" role="group" aria-label="Motion">
-        <button data-kind="none">Steady</button>
-        <button data-kind="chase">Chase</button>
-        <button data-kind="breathe">Breathe</button>
-        <button data-kind="pulse">Pulse</button>
-      </div>
+      <div id="effect-seg" class="segmented motion-choices" role="group" aria-label="Motion"></div>
       <div id="motion-options" class="motion-options" hidden>
         <div id="dir-row" class="opt-row">
           <span class="muted small">Direction</span>
@@ -532,6 +522,6 @@
   </dialog>
 
 
-  <script src="app.js?v=2026.11.24-19"></script>
+  <script src="app.js?v=2026.11.24-20"></script>
 </body>
 </html>

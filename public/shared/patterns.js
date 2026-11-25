@@ -413,10 +413,31 @@ export function cellsToStates(pos, cells, level = 1) {
 // chase speed is set per light and each strip gets its own period.
 
 const PERIODS = {
-  chase: { slow: 4, fast: 0.02 },    // seconds per light, along the string
+  chase: { slow: 4, fast: 0.02 },    // seconds per light, along the string (also wave and comet)
+  drift: { slow: 30, fast: 2 },      // seconds per light: a very slow slide
   breathe: { slow: 60, fast: 0.6 },  // seconds per fade down and back
+  shimmer: { slow: 3, fast: 0.15 },  // seconds per gentle flutter
   pulse: { slow: 6, fast: 0.12 },    // seconds per blink
+  strobe: { slow: 1, fast: 0.06 },   // seconds per flash
 };
+
+// Every motion, in the order they're offered. "Travel" motions move the
+// pattern along the string (LIFX move); the others happen in place on each
+// strip (LIFX breathe/pulse waveforms). Wave and comet also shape the
+// pattern's brightness along the string before it moves.
+export const MOTIONS = [
+  { type: 'none', name: 'Steady', help: 'Colors stay still' },
+  { type: 'chase', name: 'Chase', help: 'Colors travel along the lights', travel: true },
+  { type: 'wave', name: 'Wave', help: 'Soft bands of light roll down the line', travel: true },
+  { type: 'comet', name: 'Comet', help: 'Bright heads with fading tails', travel: true },
+  { type: 'drift', name: 'Color drift', help: 'Colors slide slowly all evening', travel: true },
+  { type: 'breathe', name: 'Breathe', help: 'Fades gently down and up' },
+  { type: 'shimmer', name: 'Shimmer', help: 'A quick, gentle flutter' },
+  { type: 'pulse', name: 'Pulse', help: 'Blinks in a steady beat' },
+  { type: 'strobe', name: 'Strobe', help: 'Fast flashes. Not for anyone sensitive to flashing light' },
+];
+export const MOTION_TYPES = MOTIONS.map(m => m.type);
+export const isTravel = type => !!MOTIONS.find(m => m.type === type)?.travel;
 const OLD_SPEEDS = { slow: 0.2, medium: 0.5, fast: 0.8 }; // patterns saved before the slider
 export const DEFAULT_TO = 'brightness:0.05';
 
@@ -427,7 +448,7 @@ export const periodFor = (type, speed) => {
 
 export function normalizeMotion(effect, motion = {}) {
   if (effect && typeof effect === 'object') return normalizeMotion(effect.type, effect);
-  const type = effect === 'chase' || effect === 'chase-back' ? 'chase' : effect === 'breathe' || effect === 'pulse' ? effect : 'none';
+  const type = effect === 'chase-back' ? 'chase' : MOTION_TYPES.includes(effect) ? effect : 'none';
   return {
     type,
     dir: effect === 'chase-back' || motion?.dir === 'backward' ? 'backward' : 'forward',
@@ -444,19 +465,50 @@ export const legacyEffect = mo => (mo.type === 'chase' ? (mo.dir === 'backward' 
  * `selector` is the whole set (e.g. a group); `lights` are the lights in it,
  * so chase can give each strip the period that keeps them all in step.
  */
-export function motionRequests(mo, selector, lights = []) {
+export function motionRequests(mo, selector, lights = [], prefs = {}) {
   if (!mo || mo.type === 'none') return [];
-  if (mo.type === 'chase') {
-    const perLight = periodFor('chase', mo.speed);
-    const body = zones => ({ direction: mo.dir === 'backward' ? 'backward' : 'forward', period: Math.max(0.2, Math.round(perLight * zones * 100) / 100), power_on: true });
+  if (isTravel(mo.type)) {
+    const perLight = periodFor(mo.type === 'drift' ? 'drift' : 'chase', mo.speed);
+    // A strip laid "reversed" along the string has to move the other way to keep the flow.
+    const body = (zones, reversed) => ({
+      direction: (mo.dir === 'backward') !== !!reversed ? 'backward' : 'forward',
+      period: Math.max(0.2, Math.round(perLight * zones * 100) / 100),
+      power_on: true,
+    });
     const strips = lights.filter(isMultizone);
-    if (!strips.length) return [{ selector, effect: 'move', body: body(40) }];
-    return strips.map(l => ({ selector: `id:${l.id}`, effect: 'move', body: body(stripLength(l)) }));
+    if (!strips.length) return [{ selector, effect: 'move', body: body(40, false) }];
+    return strips.map(l => ({ selector: `id:${l.id}`, effect: 'move', body: body(stripLength(l), prefs?.reversed?.[l.id]) }));
   }
-  if (mo.type === 'breathe' || mo.type === 'pulse') {
-    return [{ selector, effect: mo.type, body: { color: mo.to || DEFAULT_TO, period: periodFor(mo.type, mo.speed), cycles: 100000, persist: false, power_on: true } }];
+  const wave = { breathe: ['breathe', mo.to || DEFAULT_TO], pulse: ['pulse', mo.to || DEFAULT_TO], shimmer: ['breathe', 'brightness:0.55'], strobe: ['pulse', 'brightness:0'] }[mo.type];
+  if (!wave) return [];
+  return [{ selector, effect: wave[0], body: { color: wave[1], period: periodFor(mo.type, mo.speed), cycles: 100000, persist: false, power_on: true } }];
+}
+
+/**
+ * The cells as they're painted for a motion. Wave and comet shape the
+ * brightness along the string (the move effect then rolls that shape along);
+ * every other motion paints the pattern as it is.
+ */
+export function motionCells(cells, mo) {
+  const n = cells.length;
+  if (mo?.type === 'wave') {
+    const L = Math.max(8, Math.min(30, Math.round(n / 4))); // a few bands around the house
+    return cells.map((x, i) => {
+      const f = 0.5 + 0.5 * Math.cos((2 * Math.PI * i) / L);
+      return { c: x.c, b: x.b > 0 ? Math.max(0.01, Math.round(x.b * (0.1 + 0.9 * f) * 100) / 100) : 0 };
+    });
   }
-  return [];
+  if (mo?.type === 'comet') {
+    const S = Math.max(10, Math.min(24, Math.round(n / 4))); // comets this far apart
+    const tail = Math.round(S * 0.6);
+    return cells.map((x, i) => {
+      // How far behind its comet's head this light is (the head leads the way it moves).
+      const d = mo.dir === 'backward' ? i % S : (S - (i % S)) % S;
+      const f = d === 0 ? 1 : d < tail ? Math.exp(-d / (tail / 3)) : 0;
+      return { c: x.c, b: x.b > 0 && f > 0 ? Math.max(0.01, Math.round(x.b * f * 100) / 100) : 0 };
+    });
+  }
+  return cells;
 }
 
 // ---------- What a schedule shows ----------
@@ -484,7 +536,7 @@ export function expandPattern(pattern, lights, prefs) {
   const pos = positions(orderLights(lights, prefs), prefs);
   return {
     name: pattern.name,
-    states: cellsToStates(pos, patternCells(pattern, prefs, pos.length), 1),
+    states: cellsToStates(pos, motionCells(patternCells(pattern, prefs, pos.length), patternMotion(pattern)), 1),
     motion: patternMotion(pattern),
   };
 }

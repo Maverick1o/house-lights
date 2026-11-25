@@ -745,3 +745,18 @@ test('gradients can be sent to another house, and are checked like any pattern',
   assert.equal((await admin.call('POST', 'shares/mom_and_dad', { from: 'home', pattern: broken })).status, 400);
 });
 
+test('schedules accept the new motions and start them when fully on', async () => {
+  const { app, lifxCalls, setClock } = setup();
+  const { admin } = await setUpAdmin(app);
+  const res = await admin.call('PUT', 'schedules/home/evening01', { schedule: schedule({ pattern: { ...schedule().pattern, motion: { type: 'shimmer', speed: 0.5 } } }) });
+  assert.equal(res.status, 200, JSON.stringify(res.body));
+  assert.equal((await admin.call('PUT', 'schedules/home/evening02', { schedule: schedule({ pattern: { ...schedule().pattern, motion: { type: 'disco' } } }) })).status, 400);
+  const plan = planFor({ ...schedule(), location: NYC }, { y: 2026, m: 12, d: 21 });
+  setClock(plan.fullOn.getTime() + 60000);
+  lifxCalls.length = 0;
+  await tickReq(app, 'good-shimmer');
+  const call = lifxCalls.at(-1);
+  assert.match(call.url, /effects\/breathe$/);
+  assert.equal(call.body.color, 'brightness:0.55');
+});
+

@@ -17,13 +17,13 @@
  */
 import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
-  normalizeMotion, patternMotion, legacyEffect, motionRequests, resolvePattern, DEFAULT_TO,
+  normalizeMotion, patternMotion, legacyEffect, motionRequests, motionCells, MOTIONS, isTravel, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-19';
-import * as P from './shared/patterns.js?v=2026.11.24-19';
-import * as core from './shared/schedule-core.js?v=2026.11.24-19';
+} from './shared/patterns.js?v=2026.11.24-20';
+import * as P from './shared/patterns.js?v=2026.11.24-20';
+import * as core from './shared/schedule-core.js?v=2026.11.24-20';
 
-const APP_VERSION = '2026.11.24-19';
+const APP_VERSION = '2026.11.24-20';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -307,17 +307,19 @@ async function sendStates(states, what) {
   }
 }
 
-// Start a motion on a set of lights (each strip gets its own chase period, so they keep pace).
+// Start a motion on a set of lights (each strip gets its own period, and its
+// own direction if it's laid reversed, so the whole string flows together).
 async function startMotion(selector, mo, lights) {
-  for (const r of motionRequests(mo, selector, lights)) await api('POST', `/lights/${enc(r.selector)}/effects/${r.effect}`, r.body);
+  const prefs = gp(lights[0]?.group?.id || 'none');
+  for (const r of motionRequests(mo, selector, lights, prefs)) await api('POST', `/lights/${enc(r.selector)}/effects/${r.effect}`, r.body);
 }
 
 // Paint cells along a set of strips, then optionally start the motion.
 async function paint(selector, pos, cells, level, effect = 'none') {
   step('stopping any animation…');
   await effectsOff(selector);
-  await sendStates(cellsToStates(pos, cells, level), `painting ${pos.length} lights`);
   const mo = normalizeMotion(effect);
+  await sendStates(cellsToStates(pos, motionCells(cells, mo), level), `painting ${pos.length} lights`);
   if (mo.type !== 'none') {
     step(`starting ${mo.type}…`);
     await startMotion(selector, mo, [...new Set(pos.map(p => p.light))]);
@@ -778,7 +780,8 @@ function groupStatus(g, now, on, online) {
   return {
     title: patternLabel(now.name, now.id) + moving,
     detail: now.scheduled ? `From your schedule · fades off at ${t(now.until)}` : now.until ? `Until the ${t(now.until)} fade-off` : '',
-    cells: now.cells,
+    // As painted: wave and comet shape the brightness along the string.
+    cells: now.cells && motionCells(now.cells, normalizeMotion(now.effect)),
     // Unknown cells (e.g. someone else's pattern): use the lights' own colors.
     colors: now.cells ? now.cells.filter(x => x.b > 0).map(cellCss) : lightColors(),
   };
@@ -835,7 +838,8 @@ function brightnessRow(g, now, p, online) {
     el('span', { class: 'sun', 'aria-hidden': 'true' }, '☀︎'));
 }
 
-const MOTION_NAME = { none: 'Steady', chase: 'Chase', breathe: 'Breathe', pulse: 'Pulse' };
+const MOTION_NAME = Object.fromEntries(MOTIONS.map(m => [m.type, m.name]));
+const SHAPED = new Set(['wave', 'comet']); // motions that change how the pattern is painted
 const isWhite = c => (parseColor(c).saturation ?? 0) < 0.05;
 
 // Every tab panel starts with what it does, and where that stands now.
@@ -918,36 +922,59 @@ function patternChip(g, pt, now) {
 const MOTION_ICON = {
   none: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="5" cy="12" r="1.6"/><circle cx="12" cy="12" r="1.6"/><circle cx="19" cy="12" r="1.6"/></svg>',
   chase: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 12h13M12 7l5 5-5 5"/><path d="M3 7h4M3 17h4"/></svg>',
+  wave: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 14c2.5-5 5-5 7.5 0s5 5 7.5 0 3.5-3 5-1.5"/><path d="M2 19h20" opacity=".45"/></svg>',
+  comet: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="18" cy="12" r="2.6"/><path d="M14 12H3M13.5 9H6M13.5 15H6" opacity=".55"/></svg>',
+  drift: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 9h12M3 15h18M12 6l3 3-3 3"/></svg>',
   breathe: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3.2"/><circle cx="12" cy="12" r="7.5" opacity=".55"/></svg>',
+  shimmer: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5 18 18M18 6l-2.5 2.5M8.5 15.5 6 18"/></svg>',
   pulse: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12h4l2-5 4 10 2.5-7 1.5 2h5"/></svg>',
+  strobe: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13.5 2.5 5 13.5h6.5L10.5 21.5 19 10.5h-6.5z"/></svg>',
 };
-const MOTION_HELP = {
-  none: 'Colors stay still',
-  chase: 'Colors travel along the lights',
-  breathe: 'Fades gently down and up',
-  pulse: 'Blinks in a steady beat',
-};
+const MOTION_HELP = Object.fromEntries(MOTIONS.map(m => [m.type, m.help]));
+
+// Strobe can affect people with photosensitive epilepsy: ask once per visit.
+function strobeOk() {
+  if (ui.strobeOk) return true;
+  ui.strobeOk = confirm('Strobe flashes the lights quickly.\n\nFlashing light can trigger seizures in people with photosensitive epilepsy, and can be distracting to drivers and neighbors. Turn it on?');
+  return ui.strobeOk;
+}
+
 const speedWord = s => (s < 0.3 ? 'slow' : s > 0.7 ? 'fast' : 'medium');
 
 function motionTab(g, now) {
   const sel = `group_id:${g.id}`;
   const mo = normalizeMotion(now?.effect);
-  const apply = (next, label) => run(`${label} · ${g.name}`, async () => {
-    await effectsOff(sel);
-    if (next.type !== 'none') await startMotion(sel, next, g.lights);
-    setLastMotion(g, next, now);
-  });
+  const apply = (next, label) => {
+    if (next.type === 'strobe' && mo.type !== 'strobe' && !strobeOk()) return;
+    // Wave and comet shape the pattern itself, so switching to or from them repaints it.
+    const repaint = SHAPED.has(next.type) || SHAPED.has(mo.type);
+    if (repaint && !now?.cells) return showActivity('Show a pattern or color first, then add this motion.', 'err');
+    return run(`${label} · ${g.name}`, async () => {
+      if (repaint) {
+        await paintGroup(g, now.cells, next, { name: now.name, id: now.id, kind: now.kind });
+        return;
+      }
+      await effectsOff(sel);
+      if (next.type !== 'none') await startMotion(sel, next, g.lights);
+      setLastMotion(g, next, now);
+    });
+  };
   const state = mo.type === 'none' ? 'Steady' : `${MOTION_NAME[mo.type]}, ${speedWord(mo.speed)}`;
+  const tile = m => {
+    const ic = el('span', { class: 'motion-ico', 'aria-hidden': 'true' });
+    ic.innerHTML = MOTION_ICON[m.type];
+    return el('button', {
+      class: 'motion-tile' + (mo.type === m.type ? ' active' : '') + (m.type === 'none' ? ' wide' : ''), role: 'radio', 'aria-checked': String(mo.type === m.type),
+      onclick: () => mo.type !== m.type && apply({ ...mo, type: m.type }, m.name),
+    }, ic, el('strong', { text: m.name }), el('span', { class: 'muted small', text: m.help }));
+  };
   return panelWrap('How the lights move', state,
     el('div', { class: 'motion-grid', role: 'radiogroup', 'aria-label': 'Motion' },
-      ...['none', 'chase', 'breathe', 'pulse'].map(type => {
-        const ic = el('span', { class: 'motion-ico', 'aria-hidden': 'true' });
-        ic.innerHTML = MOTION_ICON[type];
-        return el('button', {
-          class: 'motion-tile' + (mo.type === type ? ' active' : ''), role: 'radio', 'aria-checked': String(mo.type === type),
-          onclick: () => mo.type !== type && apply({ ...mo, type }, MOTION_NAME[type]),
-        }, ic, el('strong', { text: MOTION_NAME[type] }), el('span', { class: 'muted small', text: MOTION_HELP[type] }));
-      })),
+      tile(MOTIONS[0]),
+      el('div', { class: 'motion-group-label', text: 'Travel along the lights' }),
+      ...MOTIONS.filter(m => m.travel).map(tile),
+      el('div', { class: 'motion-group-label', text: 'In place' }),
+      ...MOTIONS.filter(m => m.type !== 'none' && !m.travel).map(tile)),
     mo.type !== 'none' && el('div', { class: 'panel-section settings-list' },
       el('div', { class: 'setting' },
         el('span', { class: 'setting-name', text: 'Speed' }),
@@ -958,7 +985,7 @@ function motionTab(g, now) {
             onchange: e => apply({ ...mo, speed: e.target.value / 100 }, 'Speed'),
           }),
           el('span', { class: 'muted small', text: 'Fast' }))),
-      mo.type === 'chase' && el('div', { class: 'setting' },
+      isTravel(mo.type) && el('div', { class: 'setting' },
         el('span', { class: 'setting-name', text: 'Direction' }),
         el('div', { class: 'segmented two grow', role: 'group', 'aria-label': 'Direction' },
           ...[['forward', 'Forward'], ['backward', 'Back']].map(([d, label]) => el('button', {
@@ -1505,12 +1532,18 @@ const FADE_TO = [
 function renderMotion() {
   const mo = maker.motion;
   const mark = (sel, attr, value) => document.querySelectorAll(sel).forEach(b => b.classList.toggle('active', b.dataset[attr] === value));
+  if ($('#effect-seg').childElementCount !== MOTIONS.length) {
+    $('#effect-seg').replaceChildren(...MOTIONS.map(m => el('button', { 'data-kind': m.type, onclick: () => {
+      if (m.type === 'strobe' && maker.motion.type !== 'strobe' && !strobeOk()) return;
+      setMotion({ type: m.type });
+    } }, m.name)));
+  }
   mark('#effect-seg button', 'kind', mo.type);
   $('#motion-options').hidden = mo.type === 'none';
-  $('#dir-row').hidden = mo.type !== 'chase';
+  $('#dir-row').hidden = !isTravel(mo.type);
   mark('#dir-seg button', 'dir', mo.dir);
   $('#speed-slider').value = Math.round(mo.speed * 100);
-  $('#to-row').hidden = mo.type === 'chase';
+  $('#to-row').hidden = !['breathe', 'pulse'].includes(mo.type);
   $('#to-label').textContent = mo.type === 'pulse' ? 'Blinks to' : 'Fades to';
   $('#to-swatches').replaceChildren(...FADE_TO.map(c => el('button', {
     class: 'swatch-btn small' + (c.name === 'Off' ? ' off-swatch' : '') + (mo.to === c.api ? ' active' : ''),
@@ -1518,12 +1551,7 @@ function renderMotion() {
     style: c.name === 'Off' ? '' : `background:${c.css}`,
     onclick: () => setMotion({ to: c.api }),
   }, c.name === 'Dim' ? 'Dim' : c.name === 'Off' ? 'Off' : null)));
-  $('#motion-note').textContent = {
-    none: '',
-    chase: 'Your pattern travels along the lights.',
-    breathe: 'Try it: on some strips the whole strip fades to one color while breathing, then your pattern returns when you stop it.',
-    pulse: 'Try it: on some strips the whole strip blinks to one color, then your pattern returns when you stop it.',
-  }[mo.type];
+  $('#motion-note').textContent = mo.type === 'none' ? '' : `${MOTION_HELP[mo.type]}.${['breathe', 'pulse', 'shimmer', 'strobe'].includes(mo.type) ? ' Each strip does this as a whole.' : ''}`;
 }
 
 function setMotion(change) {
@@ -2248,7 +2276,7 @@ function scheduleSnapshot(g, ref) {
   const pos = positions(g.lights, g.id);
   return {
     name: ref.source === 'last' ? (pt ? pt.name : 'Last played') : use.name,
-    states: cellsToStates(pos, patternCells(use, g.id, pos.length), 1),
+    states: cellsToStates(pos, motionCells(patternCells(use, g.id, pos.length), patternMotion(use)), 1),
     motion: patternMotion(use),
   };
 }
@@ -2942,7 +2970,7 @@ $('#overrides-reset').addEventListener('click', () => {
   maker.overrides = {};
   afterEdit();
 });
-document.querySelectorAll('#effect-seg button').forEach(b => b.addEventListener('click', () => setMotion({ type: b.dataset.kind })));
+
 document.querySelectorAll('#dir-seg button').forEach(b => b.addEventListener('click', () => setMotion({ dir: b.dataset.dir })));
 // Dragging the speed slider is one undo step, saved when you let go.
 let speedDragStart = null;
@@ -3177,9 +3205,16 @@ function renderGradient() {
   $('#grad-flow-note').textContent = m.style === 'mirror'
     ? `Flows there and back ${m.repeat === 1 ? 'once' : `${m.repeat} times`} around the house, about ${each} lights each way.`
     : `Runs ${m.repeat === 1 ? 'once' : `${m.repeat} times`} around the house, about ${each} lights each time.`;
+  if ($('#grad-motion').childElementCount !== MOTIONS.length) {
+    $('#grad-motion').replaceChildren(...MOTIONS.map(x => el('button', { 'data-v': x.type, onclick: () => {
+      if (x.type === 'strobe' && grad.motion.type !== 'strobe' && !strobeOk()) return;
+      grad.motion = { ...grad.motion, type: x.type };
+      renderGradient();
+    } }, x.name)));
+  }
   document.querySelectorAll('#grad-motion button').forEach(b => b.classList.toggle('active', b.dataset.v === m.motion.type));
   $('#grad-motion-extra').hidden = m.motion.type === 'none';
-  $('#grad-dir').hidden = m.motion.type !== 'chase';
+  $('#grad-dir').hidden = !isTravel(m.motion.type);
   $('#grad-dir').textContent = m.motion.dir === 'backward' ? '← Back' : 'Forward →';
   $('#grad-speed').value = Math.round(m.motion.speed * 100);
   $('#grad-presets').replaceChildren(...BUILTIN.filter(isGradient).map(pt => el('button', {
@@ -3369,7 +3404,7 @@ $('#grad-rep-minus').addEventListener('click', () => { grad.repeat = Math.max(1,
 $('#grad-rep-plus').addEventListener('click', () => { grad.repeat = Math.min(8, grad.repeat + 1); renderGradient(); });
 document.querySelectorAll('#grad-style button').forEach(b => b.addEventListener('click', () => { grad.style = b.dataset.v; renderGradient(); }));
 document.querySelectorAll('#grad-blend button').forEach(b => b.addEventListener('click', () => { grad.blend = b.dataset.v; renderGradient(); }));
-document.querySelectorAll('#grad-motion button').forEach(b => b.addEventListener('click', () => { grad.motion = { ...grad.motion, type: b.dataset.v }; renderGradient(); }));
+
 $('#grad-dir').addEventListener('click', () => { grad.motion = { ...grad.motion, dir: grad.motion.dir === 'backward' ? 'forward' : 'backward' }; renderGradient(); });
 $('#grad-speed').addEventListener('change', e => { grad.motion = { ...grad.motion, speed: e.target.value / 100 }; renderGradient(); });
 $('#grad-preview').addEventListener('click', () => {
