@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-13';
-import * as P from './shared/patterns.js?v=2026.11.24-13';
-import * as core from './shared/schedule-core.js?v=2026.11.24-13';
+} from './shared/patterns.js?v=2026.11.24-14';
+import * as P from './shared/patterns.js?v=2026.11.24-14';
+import * as core from './shared/schedule-core.js?v=2026.11.24-14';
 
-const APP_VERSION = '2026.11.24-13';
+const APP_VERSION = '2026.11.24-14';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -633,10 +633,12 @@ function renderMain() {
 
 // Collapsed groups show only the essentials. Kept per person and per house.
 const houseCollapseKey = () => (demo ? 'demo' : house?.key || '');
-const isCollapsed = gid => (collapsedGroups[houseCollapseKey()] || []).includes(gid);
+// Until you choose, the first group starts open and the rest closed.
+const collapsedList = () => collapsedGroups[houseCollapseKey()] ?? getGroups().slice(1).map(g => g.id);
+const isCollapsed = gid => collapsedList().includes(gid);
 function setCollapsed(gids, collapsed) {
   const key = houseCollapseKey();
-  const set = new Set(collapsedGroups[key] || []);
+  const set = new Set(collapsedList());
   for (const gid of gids) collapsed ? set.add(gid) : set.delete(gid);
   collapsedGroups = { ...collapsedGroups, [key]: [...set] };
   if (!demo) saveUserPrefs();
@@ -651,6 +653,11 @@ function rerender() {
   else renderMain();
 }
 
+// A group is a small stack of cards that read as one unit:
+//   hero     the lights themselves: what's on, power, brightness (all you see when collapsed)
+//   choose   Colors | Patterns: one thing shows at a time
+//   motion   how it moves
+//   schedule when it comes on by itself
 function groupCard(g) {
   const p = gp(g.id);
   const sel = `group_id:${g.id}`;
@@ -666,26 +673,103 @@ function groupCard(g) {
   ].filter(Boolean).join(' · ');
 
   const now = showing(g);
-  const brightnessValue = now?.scheduled ? Math.round(now.level * 100)
+  const collapsed = isCollapsed(g.id);
+  const status = groupStatus(g, now, on, online);
+  const lit = on && status.colors.length > 0;
+  const toggle = () => setCollapsed([g.id], !collapsed);
+
+  const hero = el('div', {
+    class: 'card hero' + (lit ? ' lit' : '') + (collapsed ? ' collapsed' : ''),
+    style: lit ? glowStyle(status.colors) : '',
+    // Tapping the card (anywhere but its controls) expands or collapses it.
+    onclick: e => { if (!e.target.closest('button, input, label, .switch')) toggle(); },
+  },
+  el('div', { class: 'hero-top' },
+    el('button', {
+      class: 'group-toggle', 'aria-expanded': String(!collapsed), 'aria-label': `${g.name}, ${collapsed ? 'show controls' : 'hide controls'}`, onclick: toggle,
+    },
+    el('span', { class: 'hero-name' }, g.name, el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
+    el('span', { class: 'hero-sub', text: sub })),
+    el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name} strips and settings`, title: 'Strips and settings', onclick: () => openGroupScreen(g) }, '⋯'),
+    toggleSwitch(on, !online.length, e =>
+      run(`${g.name} ${e.target.checked ? 'on' : 'off'}`, () => setState(sel, { power: e.target.checked ? 'on' : 'off' })))),
+  el('div', { class: 'hero-status' },
+    el('div', { class: 'status-title', text: status.title }),
+    status.detail && el('div', { class: 'status-detail', text: status.detail })),
+  lightString(status, on),
+  !collapsed && online.length > 0 && brightnessRow(g, now, p, online));
+
+  const stack = el('section', { class: 'group-stack' + (collapsed ? ' collapsed' : ''), 'aria-label': g.name }, hero);
+  if (!online.length || collapsed) return stack;
+
+  if (multi && !p.ordered) {
+    stack.append(el('button', { class: 'card tip-row', onclick: () => openGroupScreen(g) },
+      el('span', { class: 'tip-icon', 'aria-hidden': 'true' }, '↔︎'),
+      el('span', { class: 'grow' }, el('strong', { text: 'Set your strip order' }), el('span', { class: 'muted small', text: 'So patterns flow around the house the right way' })),
+      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
+  }
+  stack.append(chooseCard(g, now), motionCard(g, now), !demo ? scheduleCard(g) : '');
+  return stack;
+}
+
+// What the hero says: what's on now, or (when off) what's next.
+function groupStatus(g, now, on, online) {
+  const lightColors = () => online.filter(l => l.power === 'on').map(cssColor);
+  if (!online.length) return { title: 'Offline', detail: 'Check the lights’ power and Wi-Fi', colors: [] };
+  if (!on) {
+    const next = !demo && nextScheduled(g);
+    if (!next) return { title: 'Off', detail: '', colors: [] };
+    const tz = next.s.location.tz;
+    return { title: 'Off', detail: `Fades on ${dayWord(next.plan, tz).toLowerCase()} at ${fmtTime(next.plan.fadeInStart, tz)} · ${scheduledName(g, next.s)}`, colors: [] };
+  }
+  if (!now) return { title: 'On', detail: 'Colors set outside this app', colors: lightColors() };
+  const t = d => fmtTime(d, now.tz);
+  const moving = now.effect?.type && now.effect.type !== 'none' ? ` · ${MOTION_NAME[now.effect.type]}` : '';
+  return {
+    title: patternLabel(now.name, now.id) + moving,
+    detail: now.scheduled ? `From your schedule · fades off at ${t(now.until)}` : now.until ? `Until the ${t(now.until)} fade-off` : '',
+    cells: now.cells,
+    colors: (now.cells || []).filter(x => x.b > 0).map(cellCss),
+  };
+}
+
+// The lights as a string of glowing dots, in their current colors.
+function lightString(status, on, count = 30) {
+  const box = el('div', { class: 'light-string' + (on ? '' : ' dark'), 'aria-hidden': 'true' });
+  const cells = status.cells;
+  for (let i = 0; i < count; i++) {
+    let css = null, b = 1;
+    if (on && cells?.length) {
+      const x = cells[Math.floor((i * cells.length) / count)];
+      if (x.b > 0) { css = cellCss(x); b = x.b; }
+    } else if (on && status.colors.length) {
+      css = status.colors[Math.floor((i * status.colors.length) / count)];
+    }
+    box.append(el('span', { style: css ? `--c:${css};opacity:${Math.max(0.45, Math.min(1, b * 1.5))}` : '' }));
+  }
+  return box;
+}
+
+// A soft wash of the lights' colors behind the hero card.
+function glowStyle(colors) {
+  const at = f => colors[Math.min(colors.length - 1, Math.floor(f * colors.length))];
+  const mix = (c, pct) => `color-mix(in srgb, ${c} ${pct}%, transparent)`;
+  return `background:
+    radial-gradient(120% 90% at 0% 0%, ${mix(at(0.1), 30)}, transparent 65%),
+    radial-gradient(120% 90% at 100% 100%, ${mix(at(0.9), 26)}, transparent 65%),
+    radial-gradient(90% 80% at 70% 0%, ${mix(at(0.5), 18)}, transparent 70%),
+    var(--card);`;
+}
+
+function brightnessRow(g, now, p, online) {
+  const sel = `group_id:${g.id}`;
+  const value = now?.scheduled ? Math.round(now.level * 100)
     : now ? Math.round(p.level * 100)
       : Math.round(Math.max(0, ...online.map(l => l.brightness || 0)) * 100);
-
-  const collapsed = isCollapsed(g.id);
-  const card = el('div', { class: 'card group' + (collapsed ? ' collapsed' : '') },
-    el('div', { class: 'light-head' },
-      el('button', {
-        class: 'group-toggle', 'aria-expanded': String(!collapsed), 'aria-label': `${collapsed ? 'Expand' : 'Collapse'} ${g.name}`,
-        onclick: () => setCollapsed([g.id], !collapsed),
-      },
-      el('span', { class: 'dot' + (on ? '' : ' off'), style: `background:${online[0] ? cssColor(online[0]) : '#333'}` }),
-      el('span', { class: 'name' }, el('strong', { text: g.name }), el('span', { class: 'muted small', text: sub })),
-      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
-      !collapsed && el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name} settings`, title: 'Group settings', onclick: () => openGroupScreen(g) }, '⋯'),
-      toggleSwitch(on, !online.length, e =>
-        run(`${g.name} ${e.target.checked ? 'on' : 'off'}`, () => setState(sel, { power: e.target.checked ? 'on' : 'off' })))),
-    // Brightness only when expanded; collapsed cards keep just the essentials.
-    !collapsed && el('input', {
-      type: 'range', min: 1, max: 100, value: brightnessValue || 1, 'aria-label': `${g.name} brightness`, disabled: !online.length,
+  return el('div', { class: 'bright-row' },
+    el('span', { class: 'sun dim', 'aria-hidden': 'true' }, '☀︎'),
+    el('input', {
+      type: 'range', min: 1, max: 100, value: value || 1, 'aria-label': `${g.name} brightness`,
       onchange: e => {
         const v = e.target.value / 100;
         if (now?.cells) {
@@ -698,63 +782,23 @@ function groupCard(g) {
         }
       },
     }),
-    nowLine(g, now, on, online.length > 0));
-
-  if (!online.length || collapsed) return card;
-
-  // One thing shows at a time: a solid color or a pattern.
-  const tab = ui.tab[g.id] || (isSolid(now) ? 'color' : 'pattern');
-  card.append(
-    el('div', { class: 'show-head' },
-      el('h3', { text: 'Show' }),
-      el('div', { class: 'segmented two compact', role: 'tablist', 'aria-label': 'Show a solid color or a pattern' },
-        ...[['color', 'Solid color'], ['pattern', 'Pattern']].map(([k, label]) => el('button', {
-          role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k),
-          onclick: () => { ui.tab[g.id] = k; ui.editColors = null; renderMain(); },
-        }, label)))),
-    tab === 'color' ? colorsPanel(g, now) : patternsPanel(g, now),
-    motionRow(g, now),
-    !demo && schedulesSection(g));
-
-  if (multi && !p.ordered) {
-    card.append(el('button', { class: 'hint hint-btn', onclick: () => openGroupScreen(g) },
-      'Tip: set your strip order so patterns flow around the house the right way ›'));
-  }
-  return card;
-}
-
-// What's on right now, or (when off) what's next.
-function nowLine(g, now, on, online) {
-  if (!online) return el('div', { class: 'now-line muted small' }, 'Offline');
-  if (!on) {
-    const next = !demo && nextScheduled(g);
-    const tz = next?.s.location.tz;
-    const when = next && `${dayWord(next.plan, tz)} ${fmtTime(next.plan.fadeInStart, tz)}`;
-    return el('div', { class: 'now-line' },
-      el('span', { class: 'preview-strip off', 'aria-hidden': 'true' }),
-      el('span', { class: 'now-text' },
-        el('strong', { text: 'Off' }),
-        next && el('span', { class: 'muted small', text: `Next: ${when} · ${scheduledName(g, next.s)}` })));
-  }
-  if (!now) {
-    return el('div', { class: 'now-line' }, el('span', { class: 'preview-strip unknown', 'aria-hidden': 'true' }),
-      el('span', { class: 'now-text' }, el('strong', { text: 'On' }), el('span', { class: 'muted small', text: 'Colors set outside this app' })));
-  }
-  const t = d => fmtTime(d, now.tz);
-  const moving = now.effect?.type && now.effect.type !== 'none' ? ` · ${MOTION_NAME[now.effect.type]}` : '';
-  const detail = now.scheduled ? `From your schedule · fades off at ${t(now.until)}`
-    : now.until ? `Until the ${t(now.until)} fade-off` : '';
-  return el('div', { class: 'now-line' },
-    previewStrip(now.cells),
-    el('span', { class: 'now-text' },
-      el('span', { class: 'muted small', text: 'Showing' }),
-      el('strong', { text: patternLabel(now.name, now.id) + moving }),
-      detail && el('span', { class: 'muted small', text: detail })));
+    el('span', { class: 'sun', 'aria-hidden': 'true' }, '☀︎'));
 }
 
 const MOTION_NAME = { none: 'Steady', chase: 'Chase', breathe: 'Breathe', pulse: 'Pulse' };
 
-// ----- Solid colors: your favorites, plus any color -----
+// ----- Colors | Patterns: one thing shows at a time -----
+
+function chooseCard(g, now) {
+  const tab = ui.tab[g.id] || (isSolid(now) ? 'color' : 'pattern');
+  return el('div', { class: 'card section' },
+    el('div', { class: 'segmented two', role: 'tablist', 'aria-label': 'Show colors or patterns' },
+      ...[['color', 'Colors'], ['pattern', 'Patterns']].map(([k, label]) => el('button', {
+        role: 'tab', class: tab === k ? 'active' : '', 'aria-selected': String(tab === k),
+        onclick: () => { ui.tab[g.id] = k; ui.editColors = null; renderMain(); },
+      }, label))),
+    tab === 'color' ? colorsPanel(g, now) : patternsPanel(g, now));
+}
 
 const isWhite = c => (parseColor(c).saturation ?? 0) < 0.05;
 
@@ -788,14 +832,13 @@ function colorsPanel(g, now) {
       },
     }),
   }, el('span', { 'aria-hidden': 'true' }, '+'));
-  return el('div', { class: 'show-panel' },
-    el('div', { class: 'chips' }, ...swatches, more),
+  return el('div', { class: 'section-body' },
+    el('div', { class: 'swatch-grid' }, ...swatches, more),
     el('div', { class: 'panel-foot' },
       editing
         ? [el('button', { class: 'link small', onclick: () => { favColors = defaultFavorites(); saveUserPrefs(); renderMain(); } }, 'Reset to defaults'),
           el('button', { class: 'link small strong', onclick: () => { ui.editColors = null; renderMain(); } }, 'Done')]
-        : [el('span', { class: 'muted small', text: 'Shows on every light' }),
-          el('button', { class: 'link small', onclick: () => { ui.editColors = g.id; renderMain(); } }, 'Edit colors')]));
+        : [el('span'), el('button', { class: 'link small', onclick: () => { ui.editColors = g.id; renderMain(); } }, 'Edit colors')]));
 }
 
 function addFavorite(c) {
@@ -804,8 +847,6 @@ function addFavorite(c) {
   saveUserPrefs();
   showActivity('✓ Added to your colors', 'ok');
 }
-
-// ----- Patterns: what's relevant now, plus the full library -----
 
 // In-season holidays, then what you've played lately, then your own patterns.
 function topPatterns(g, now) {
@@ -817,10 +858,10 @@ function topPatterns(g, now) {
   for (const id of gp(g.id).recent || []) add(find(id));
   saved.slice(-4).reverse().forEach(add);
   if (out.length < 4) add(builtinById('b-warm'));
-  const top = out.slice(0, 8);
+  const top = out.slice(0, 6);
   // Whatever is showing is always there to see (without reshuffling the rest).
   const showingNow = now?.id && !isSolid(now) && find(now.id);
-  if (showingNow && !top.includes(showingNow)) top.splice(Math.min(top.length, 7), 1, showingNow);
+  if (showingNow && !top.includes(showingNow)) top.splice(Math.min(top.length, 5), 1, showingNow);
   return top;
 }
 
@@ -828,22 +869,23 @@ function patternChip(g, pt, now) {
   const n = positions(g.lights, g.id).length;
   const active = !!now && !isSolid(now) && (now.id ? now.id === pt.id : now.name === pt.name);
   return el('button', {
-    class: 'pattern-chip' + (active ? ' active' : '') + (isSavedId(pt.id) ? ' saved' : ''), 'aria-pressed': String(active),
+    class: 'pattern-chip' + (active ? ' active' : ''), 'aria-pressed': String(active),
     onclick: () => run(`${pt.name} · ${g.name}`, () => applyToGroup(g, pt)),
   }, previewStrip(patternCells(pt, g.id, Math.min(n, 48)), 16), el('span', { class: 'chip-name', text: patternLabel(pt.name, pt.id) }));
 }
 
 function patternsPanel(g, now) {
-  return el('div', { class: 'show-panel' },
+  return el('div', { class: 'section-body' },
     el('div', { class: 'pattern-grid' }, ...topPatterns(g, now).map(pt => patternChip(g, pt, now))),
-    el('div', { class: 'panel-foot' },
-      el('span', { class: 'muted small', text: 'In season and recent' }),
-      el('button', { class: 'link small strong', onclick: () => openLibrary(g) }, 'All patterns ›')));
+    el('button', { class: 'all-row', onclick: () => openLibrary(g) },
+      el('span', { class: 'grow' }, 'All patterns'),
+      el('span', { class: 'muted small', text: `${BUILTIN.length + saved.length}` }),
+      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')));
 }
 
 // ----- Motion: how what's showing moves, changed on the spot -----
 
-function motionRow(g, now) {
+function motionCard(g, now) {
   const sel = `group_id:${g.id}`;
   const mo = normalizeMotion(now?.effect);
   const apply = (next, label) => run(`${label} · ${g.name}`, async () => {
@@ -851,9 +893,9 @@ function motionRow(g, now) {
     if (next.type !== 'none') await startMotion(sel, next);
     setLastMotion(g, next, now);
   });
-  return el('div', { class: 'motion-row' },
-    el('h3', { text: 'Motion' }),
-    el('div', { class: 'segmented four compact', role: 'group', 'aria-label': 'Motion' },
+  return el('div', { class: 'card section' },
+    el('div', { class: 'section-title' }, 'Motion'),
+    el('div', { class: 'segmented four', role: 'group', 'aria-label': 'Motion' },
       ...['none', 'chase', 'breathe', 'pulse'].map(type => el('button', {
         class: mo.type === type ? 'active' : '', 'aria-pressed': String(mo.type === type),
         onclick: () => apply({ ...mo, type }, MOTION_NAME[type]),
@@ -862,7 +904,7 @@ function motionRow(g, now) {
       mo.type === 'chase' && el('button', {
         class: 'small', 'aria-label': 'Change direction',
         onclick: () => apply({ ...mo, dir: mo.dir === 'backward' ? 'forward' : 'backward' }, 'Change direction'),
-      }, mo.dir === 'backward' ? '← Backward' : 'Forward →'),
+      }, mo.dir === 'backward' ? '← Back' : 'Forward →'),
       el('div', { class: 'speed-control grow' },
         el('span', { class: 'muted small', text: 'Slow' }),
         el('input', {
@@ -882,23 +924,23 @@ function setLastMotion(g, mo, now) {
   saveGroupPrefs();
 }
 
-// ----- Schedules on the card -----
+// ----- Schedule: when the lights come on by themselves -----
 
-function schedulesSection(g) {
+function scheduleCard(g) {
   const list = groupSchedules(g.id);
   if (!list.length) {
-    return el('button', { class: 'schedule-row empty', onclick: () => openSchedule(g, null) },
+    return el('button', { class: 'card section add-schedule', onclick: () => openSchedule(g, null) },
       el('span', { class: 'sched-icon', text: '🌙' }),
-      el('span', { class: 'grow' }, el('strong', { text: 'Add a schedule' }), el('span', { class: 'muted small', text: 'Fade on at sunset, fade off at bedtime' })),
+      el('span', { class: 'grow' }, el('strong', { text: 'Add a schedule' }), el('span', { class: 'muted small', text: 'Fade on at sunset, off at bedtime' })),
       el('span', { class: 'chev', text: '›' }));
   }
   const stale = timerInfo?.configured && (!timerInfo.lastTick || Date.now() - timerInfo.lastTick > 20 * 60000) && !timerInfo.repaired;
-  return el('div', { class: 'sched-section' },
-    el('div', { class: 'section-head' },
-      el('h3', { text: list.length === 1 ? 'Schedule' : 'Schedules' }),
-      el('button', { class: 'link small strong', onclick: () => openSchedule(g, null) }, '+ Add')),
-    ...list.map(s => scheduleRow(g, s)),
-    stale && list.some(s => s.enabled) && el('p', { class: 'hint small', text: '⚠️ The schedule timer hasn’t checked in lately, so schedules may not run. It’s being restarted; check again in a few minutes.' }));
+  return el('div', { class: 'card section' },
+    el('div', { class: 'section-title' },
+      el('span', { class: 'grow' }, list.length === 1 ? 'Schedule' : 'Schedules'),
+      el('button', { class: 'link small', onclick: () => openSchedule(g, null) }, '+ Add')),
+    el('div', { class: 'list' }, ...list.map(s => scheduleRow(g, s))),
+    stale && list.some(s => s.enabled) && el('p', { class: 'hint warn small', text: 'The schedule timer hasn’t checked in lately. It’s being restarted; check again in a few minutes.' }));
 }
 
 // A small strip of color previewing cells (sampled down to fit).

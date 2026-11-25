@@ -23,6 +23,7 @@ const ACCOUNTS = {
   'tok-home': [
     strip('h1', 'Front South', 15, { id: 'g-holiday', name: 'Holiday' }, 0),
     strip('h2', 'Garage Eave', 30, { id: 'g-holiday', name: 'Holiday' }, 120),
+    strip('h3', 'Office', 41, { id: 'g-office', name: 'Office Lightstrip' }, 0),
   ],
   'tok-parents': [strip('p1', 'Roofline', 40, { id: 'g-parents', name: 'Christmas Lights' }, 225)],
 };
