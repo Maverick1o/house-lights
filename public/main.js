@@ -19,11 +19,11 @@ import {
   COLORS, C, cell, BUILTIN, isMultizone, stripLength, tile, cellsToStates, withDefaults, orderLights,
   normalizeMotion, patternMotion, legacyEffect, motionRequest, resolvePattern, DEFAULT_TO,
   builtinById, inSeason, CATEGORIES, layoutCells, spacingOf,
-} from './shared/patterns.js?v=2026.11.24-12';
-import * as P from './shared/patterns.js?v=2026.11.24-12';
-import * as core from './shared/schedule-core.js?v=2026.11.24-12';
+} from './shared/patterns.js?v=2026.11.24-13';
+import * as P from './shared/patterns.js?v=2026.11.24-13';
+import * as core from './shared/schedule-core.js?v=2026.11.24-13';
 
-const APP_VERSION = '2026.11.24-12';
+const APP_VERSION = '2026.11.24-13';
 const MAX_STATES = 50; // LIFX limit per /lights/states request
 
 // Colors used by "Identify strips": strip 1 red, 2 green, 3 blue …
@@ -47,6 +47,8 @@ let lights = [];
 let groupPrefs = {};      // per-group settings for the current house (synced)
 let saved = [];           // this person's saved patterns (synced)
 let favColors = [];       // this person's quick-pick colors (synced)
+let collapsedGroups = {}; // houseKey -> [groupId…] this person keeps collapsed (synced)
+let houseLocation = null; // { lat, lon, tz } of the current house, rounded to ~1 km (synced)
 let identifySnapshot = null; // { gid, lights: [...] } to restore after Identify
 let schedules = {};       // groupId -> [schedule…], for the current house
 let timerInfo = null;     // { configured, lastTick }
@@ -82,8 +84,9 @@ function flushSync(only) {
   }
 }
 
-const saveGroupPrefs = () => house && syncLater(`prefs/house/${house.key}`, { groups: structuredClone(groupPrefs) });
-const saveUserPrefs = () => syncLater('prefs/user', { patterns: structuredClone(saved), colors: structuredClone(favColors) });
+// House settings: each group's settings, plus where the house is (for sunset).
+const saveGroupPrefs = () => house && syncLater(`prefs/house/${house.key}`, { groups: structuredClone(groupPrefs), location: houseLocation });
+const saveUserPrefs = () => syncLater('prefs/user', { patterns: structuredClone(saved), colors: structuredClone(favColors), collapsed: structuredClone(collapsedGroups) });
 
 // ---------- Talking to the backend ----------
 
@@ -621,7 +624,23 @@ function renderMain() {
   $('#status').textContent = (demo ? 'Demo mode · ' : '') +
     `${lights.length} light${lights.length === 1 ? '' : 's'} · updated ${new Date().toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}`;
   $('#empty').hidden = lights.length > 0;
-  $('#groups').replaceChildren(...getGroups().map(groupCard));
+  const groups = getGroups();
+  const allCollapsed = groups.every(g => isCollapsed(g.id));
+  $('#collapse-all').hidden = groups.length < 2;
+  $('#collapse-all').textContent = allCollapsed ? 'Expand all' : 'Collapse all';
+  $('#groups').replaceChildren(...groups.map(groupCard));
+}
+
+// Collapsed groups show only the essentials. Kept per person and per house.
+const houseCollapseKey = () => (demo ? 'demo' : house?.key || '');
+const isCollapsed = gid => (collapsedGroups[houseCollapseKey()] || []).includes(gid);
+function setCollapsed(gids, collapsed) {
+  const key = houseCollapseKey();
+  const set = new Set(collapsedGroups[key] || []);
+  for (const gid of gids) collapsed ? set.add(gid) : set.delete(gid);
+  collapsedGroups = { ...collapsedGroups, [key]: [...set] };
+  if (!demo) saveUserPrefs();
+  renderMain();
 }
 
 // Re-draw whichever screen is showing (after lights or settings change).
@@ -651,14 +670,21 @@ function groupCard(g) {
     : now ? Math.round(p.level * 100)
       : Math.round(Math.max(0, ...online.map(l => l.brightness || 0)) * 100);
 
-  const card = el('div', { class: 'card group' },
+  const collapsed = isCollapsed(g.id);
+  const card = el('div', { class: 'card group' + (collapsed ? ' collapsed' : '') },
     el('div', { class: 'light-head' },
+      el('button', {
+        class: 'group-toggle', 'aria-expanded': String(!collapsed), 'aria-label': `${collapsed ? 'Expand' : 'Collapse'} ${g.name}`,
+        onclick: () => setCollapsed([g.id], !collapsed),
+      },
       el('span', { class: 'dot' + (on ? '' : ' off'), style: `background:${online[0] ? cssColor(online[0]) : '#333'}` }),
-      el('div', { class: 'name' }, el('strong', { text: g.name }), el('span', { class: 'muted small', text: sub })),
-      el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name} settings`, title: 'Group settings', onclick: () => openGroupScreen(g) }, '⋯'),
+      el('span', { class: 'name' }, el('strong', { text: g.name }), el('span', { class: 'muted small', text: sub })),
+      el('span', { class: 'chev', 'aria-hidden': 'true' }, '›')),
+      !collapsed && el('button', { class: 'icon-btn ghost', 'aria-label': `${g.name} settings`, title: 'Group settings', onclick: () => openGroupScreen(g) }, '⋯'),
       toggleSwitch(on, !online.length, e =>
         run(`${g.name} ${e.target.checked ? 'on' : 'off'}`, () => setState(sel, { power: e.target.checked ? 'on' : 'off' })))),
-    el('input', {
+    // Brightness only when expanded; collapsed cards keep just the essentials.
+    !collapsed && el('input', {
       type: 'range', min: 1, max: 100, value: brightnessValue || 1, 'aria-label': `${g.name} brightness`, disabled: !online.length,
       onchange: e => {
         const v = e.target.value / 100;
@@ -674,7 +700,7 @@ function groupCard(g) {
     }),
     nowLine(g, now, on, online.length > 0));
 
-  if (!online.length) return card;
+  if (!online.length || collapsed) return card;
 
   // One thing shows at a time: a solid color or a pattern.
   const tab = ui.tab[g.id] || (isSolid(now) ? 'color' : 'pattern');
@@ -768,7 +794,7 @@ function colorsPanel(g, now) {
       editing
         ? [el('button', { class: 'link small', onclick: () => { favColors = defaultFavorites(); saveUserPrefs(); renderMain(); } }, 'Reset to defaults'),
           el('button', { class: 'link small strong', onclick: () => { ui.editColors = null; renderMain(); } }, 'Done')]
-        : [el('span', { class: 'muted small', text: 'Tap a color to show it on every light.' }),
+        : [el('span', { class: 'muted small', text: 'Shows on every light' }),
           el('button', { class: 'link small', onclick: () => { ui.editColors = g.id; renderMain(); } }, 'Edit colors')]));
 }
 
@@ -811,7 +837,7 @@ function patternsPanel(g, now) {
   return el('div', { class: 'show-panel' },
     el('div', { class: 'pattern-grid' }, ...topPatterns(g, now).map(pt => patternChip(g, pt, now))),
     el('div', { class: 'panel-foot' },
-      el('span', { class: 'muted small', text: 'Holidays in season and your recent picks.' }),
+      el('span', { class: 'muted small', text: 'In season and recent' }),
       el('button', { class: 'link small strong', onclick: () => openLibrary(g) }, 'All patterns ›')));
 }
 
@@ -1590,7 +1616,7 @@ async function openSchedule(g, existing) {
     id: newScheduleId(),
     groupId: g.id,
     groupName: g.name,
-    location: allSchedules().find(x => x.location)?.location || null,
+    location: houseLocation || allSchedules().find(x => x.location)?.location || null,
     // New schedules fade on whatever was played last, so they never surprise you.
     pattern: { source: 'last', name: 'Last played' },
   };
@@ -2126,6 +2152,7 @@ async function boot() {
     const p = await server('GET', 'prefs/user');
     saved = Array.isArray(p.prefs.patterns) ? p.prefs.patterns : [];
     favColors = Array.isArray(p.prefs.colors) ? p.prefs.colors : defaultFavorites();
+    collapsedGroups = p.prefs.collapsed && typeof p.prefs.collapsed === 'object' ? p.prefs.collapsed : {};
   } catch { saved = []; favColors = defaultFavorites(); }
   if (!houses.length) {
     return showAuth('notready', me.admin
@@ -2150,6 +2177,7 @@ async function setActive(h) {
   library = null;
   groupScreen = null;
   groupPrefs = {};
+  houseLocation = null;
   show('main');
   $('#status').textContent = '';
   $('#house-name').textContent = h.name;
@@ -2162,8 +2190,14 @@ async function setActive(h) {
     ]);
     if (house !== h) return; // switched again meanwhile
     groupPrefs = p.prefs.groups || {};
+    houseLocation = p.prefs.location || null;
     schedules = {};
     for (const x of sc.schedules) upsertSchedule(x);
+    // Houses set up before the location was kept with the house: take it from a schedule.
+    if (!houseLocation && sc.schedules.some(x => x.location)) {
+      houseLocation = sc.schedules.find(x => x.location).location;
+      saveGroupPrefs();
+    }
     timerInfo = sc.timer;
   } catch (e) {
     if (e.code === 'signed_out') return signedOut();
@@ -2375,6 +2409,10 @@ $('#sheet-scrim').addEventListener('click', closeColorSheet);
 
 // Library and group settings
 $('#library-back').addEventListener('click', () => { library = null; show('main'); renderMain(); });
+$('#collapse-all').addEventListener('click', () => {
+  const gids = getGroups().map(g => g.id);
+  setCollapsed(gids, !gids.every(isCollapsed));
+});
 $('#group-back').addEventListener('click', () => { groupScreen = null; show('main'); renderMain(); });
 // Tapping an empty part of the page closes the sheet.
 $('#maker').addEventListener('click', e => {
@@ -2481,11 +2519,15 @@ $('#loc-btn').addEventListener('click', () => {
   $('#loc-btn').disabled = true;
   navigator.geolocation.getCurrentPosition(pos => {
     $('#loc-btn').disabled = false;
-    setSched({ location: {
+    const location = {
       lat: Math.round(pos.coords.latitude * 100) / 100,
       lon: Math.round(pos.coords.longitude * 100) / 100,
       tz: Intl.DateTimeFormat().resolvedOptions().timeZone,
-    } });
+    };
+    // Kept with the house, so no schedule here has to ask again.
+    houseLocation = location;
+    saveGroupPrefs();
+    setSched({ location });
   }, err => {
     $('#loc-btn').disabled = false;
     alert(err.code === 1
